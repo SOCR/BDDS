@@ -3,5 +3,5 @@ This is the SOCR public repository for code related to the Big Data for Discover
 
 The [PBDA_PD folder](https://github.com/SOCR/PBDA/tree/master/PBDA_PD) contains the complete Predictive Big Data Analytics  protocol (Pipeline workflow for obtaining a vector of hundreds of derived neuroimaging biomarkers and an R-script for machine-learning diagnostic classification and forecasting) that can be applied for Parkinson's Disease studies or any other clinical or translational biomedical investigation involving heterogeneous datasets.
 
-<b>Publications</b>:
+<b>Publications</b>:<br>
 Dinov, ID, Heavner, B, Tang, M, Glusman, G, Chard, K, Darcy, M, Madduri, R, Pa, J, Spino, C, Kesselman, C, Foster, I, Deutsch, EW, Price, ND, Van Horn, JD, Ames, J, Clark, K, Hood, L, Hampstead, BM, Dauer, W, and Toga, AW. (2016) Predictive Big Data Analytics: A Study of Parkinson's Disease using Large, Complex, Heterogeneous, Incongruent, Multi-source and Incomplete Observations. PLoS ONE, 11(8):1-28, e0157077. [DOI: 10.1371/journal.pone.0157077](http://dx.doi.org/10.1371/journal.pone.0157077). 
