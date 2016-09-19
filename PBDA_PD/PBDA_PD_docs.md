@@ -1,14 +1,14 @@
 ---
-title: "Predictive Big Data Analytics (PBDA) for Parkinson's Disease"
+title: "Predictive Big Data Analytics: A Study of Parkinson's Disease Using Large, Complex, Heterogeneous, Incongruent, Multi-Source and Incomplete Observations"
 author: "SOCR Team"
 date: "September 18, 2016"
 output: html_document
 ---
   
   
-  This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+[PMID:27494614](http://www.ncbi.nlm.nih.gov/pubmed/27494614)
 
-###install required packages #######
+#install required packages
 ```{r}
 install.packages("geepack",repos="http://cran.us.r-project.org")
 install.packages(c("lme4","mi","MASS"),repos="http://cran.us.r-project.org")
@@ -27,9 +27,8 @@ options(warn=-1)
 
 ```
 
-
+#data manipulation #######
 ```{r}
-####data manipulation #######
 setwd("~/documents/PPMI") #set working director
 clinical<-read.csv("ppmi_clinical.csv",header=TRUE) #read raw data
 colnames(clinical)[2]<-"FID_IID" 
@@ -37,21 +36,18 @@ ppmi_new<-read.csv("PPMI_GSA_clinical.csv",header=TRUE)
 merged_dataset<-merge(ppmi_new,clinical,by="FID_IID",all.x=TRUE) #merge clinical data with brain image
 write.csv(merged_dataset,"ppmi_clinical_complete.csv")
 ppmi<-merged_dataset[,c(1:399,820:823,833,832,816)] #Select "tier 1" UPDRSs
-head(ppmi)
-#longitudinal analysis
+```
+
+
+##longitudinal analysis
+```{r}
 ppmi_longit<-read.csv("ppmi_top_wide_UPDRS.csv",header=TRUE)
 clinical<-read.csv("ppmi_clinical.csv",header=TRUE)
 merged_dataset<-merge(ppmi_longit,clinical,by="FID_IID",all.x=TRUE)
 ppmi_long<-merged_dataset[,c(1:342,351:354,364,365,347)]
-head(ppmi_long)
 ```
 
-
-
-
-
-
-####Longtitudinal analysis with different time points of UPDRS measurements ####
+###Longtitudinal analysis with different time points of UPDRS measurements ####
 ```{r}
 # use complete dataset with the result
 DataMissOm<-na.omit(subset(ppmi_long,select=c(time_visit,PD,FID_IID,COGSTATE,COGDECLN,FNCDTCOG,COGDXCL,EDUCYRS,L_superior_parietal_gyrus_ComputeArea
@@ -62,7 +58,10 @@ DataMissOm<-na.omit(subset(ppmi_long,select=c(time_visit,PD,FID_IID,COGSTATE,COG
 for(i in c(8:20,28:32)){
   DataMissOm[,i]<-scale(DataMissOm[,i])
 }
+```
 
+#### GEE
+```{r}
 library(geepack)
 DataMissOm$COGSTATE<-as.numeric(DataMissOm$COGSTATE)
 DataMissOm$COGDECLN<-as.numeric(DataMissOm$COGDECLN)
@@ -75,7 +74,10 @@ model_gee_UPDRS<-geeglm(PD~L_superior_parietal_gyrus_ComputeArea
                         +UPDRS_part_I+UPDRS_part_II+UPDRS_part_III+FID_IID+COGSTATE+COGDECLN+FNCDTCOG+COGDXCL+EDUCYRS,
                         data=DataMissOm,waves=time_visit,family="binomial",id=FID_IID,corstr="exchangeable",scale.fix=TRUE)
 summary(model_gee_UPDRS)
+```
 
+#### GLMM
+```{r}
 library(lme4)
 model_lmm_UPDRS<-glmer(PD~L_superior_parietal_gyrus_ComputeArea
                        +L_superior_parietal_gyrus_Volume+R_superior_parietal_gyrus_ComputeArea+R_superior_parietal_gyrus_Volume+L_putamen_ComputeArea+L_putamen_Volume+R_putamen_Volume 
@@ -90,7 +92,7 @@ nrow(DataMissOm) #2562 observations
 
 ```
 
-####Longtitudinal analysis with different time point of brain imaging measures ####
+###Longtitudinal analysis with different time point of brain imaging measures #
 ```{r}
 ppmi_base<-read.csv("ppmi_ROI_baseline.csv",header=TRUE)
 ppmi_base<-ppmi_base[,c(2,24:26,29:33)] #may add 27 28
@@ -120,21 +122,11 @@ model_gee_imaging<-geeglm(PD~L_superior_parietal_gyrus_ComputeArea
                           data=DataMissOm,waves=VisitID,family="binomial",id=FID_IID,corstr="exchangeable",scale.fix=TRUE)
 summary(model_gee_imaging)
 
-library(lme4)
-#model_lmm_imaging<-glmer(PD~L_superior_parietal_gyrus_ComputeArea
- #                        +L_superior_parietal_gyrus_Volume+R_superior_parietal_gyrus_ComputeArea+R_superior_parietal_gyrus_Volume+L_putamen_ComputeArea+L_putamen_Volume+R_putamen_Volume 
-  #                       +R_putamen_ShapeIndex+L_caudate_ComputeArea+L_caudate_Volume+R_caudate_ComputeArea+R_caudate_Volume+chr12_rs34637584_GT 
-   #                      +chr17_rs11868035_GT+chr17_rs11012_GT+chr17_rs393152_GT+chr17_rs12185268_GT+chr17_rs199533_GT+Sex+Weight+Age+UPDRS_Part_I_Summary_Score_Baseline+UPDRS_Part_II_Patient_Questionnaire_Summary_Score_Baseline+UPDRS_Part_III_Summary_Score_Baseline+FID_IID+COGSTATE+COGDECLN+FNCDTCOG+COGDXCL+EDUCYRS
-    #                     +(1|FID_IID),#control = glmerControl(optCtrl=list(maxfun=20000)),
-     #                    data=DataMissOm,family="binomial")
-#summary(model_lmm_imaging)
-length(unique(DataMissOm$FID_IID))
-nrow(DataMissOm) 
-
 
 ```
 
-#### baseline analysis ####
+
+## baseline analysis ####
 ```{r}
 ppmi_1<-ppmi[ppmi$VisitID==1,]
 ppmi_1_complete<-ppmi_1[,c(1,
@@ -147,8 +139,11 @@ ppmi_1_complete<-ppmi_1[,c(1,
 ppmi_1_complete$ind<-is.na(ppmi_1_complete$chr17_rs199533_GT)
 ppmi_1_complete<-ppmi_1_complete[ppmi_1_complete$ind==FALSE,-303]
 ppmi_MI<-ppmi_1_complete[,c(291:300)]
+```
 
-# Multiple Imputation
+### Multiple Imputation
+
+```{r}
 library(mi)
 set.seed(1414)
 mdf<-missing_data.frame(ppmi_MI)
@@ -164,8 +159,11 @@ ppmi_1_ROI<-ppmi_1[,c(1,23,24 ,28,29,33,34,38,39,143,144,148,149,282:302)] #comp
 
 write.csv(ppmi_1,"ppmi_complete_baseline.csv")
 write.csv(ppmi_1_ROI,"ppmi_ROI_baseline.csv")
+```
 
-#####explore the distribution of baseline data ####
+
+###explore the distribution of baseline data ####
+```{r}
 #categorical
 col_n<-c(14,17:22,28:31)
 #ppmi_1_ROI$APPRDX<-as.numeric(ppmi_1_ROI$APPRDX)
@@ -204,12 +202,14 @@ k<-1
 aa<-as.data.frame(aa)
 rownames(aa)<-colnames(ppmi_1_ROI)[col_n]
 colnames(aa)<-c("normality-test (>0.1 normal)")
+print(aa)
 write.csv(aa,"continuous_descriptive.csv")
 ```
 
 
-
 ###model-based analysis####
+
+###Logistic Regression ##
 ```{r}
 #logistic regression
 for(i in c(2:13,15,16,23:27,32)){
@@ -224,14 +224,11 @@ library(MASS)
 stepp<-stepAIC(logistic_ROI,trace=FALSE) #stepwise logistic regression
 summary(logistic_ROI)
 summary(stepp)
+```
 
 
-#logistic_complete<-glm(RECRUITMENT_CAT~.,data=ppmi_1[,-c(1,302)],maxit=50,family="binomial")
-#stepp<-stepAIC(logistic_complete,trace=FALSE) #stepwise model selection of ROI data
-#summary(stepp)
-
-
-#ppmi_1 complete
+####Create Complete dataset with idea disease categories
+```{r}
 ppmi_1_PD1<-ppmi_1[ppmi_1$APPRDX!="psychiatric",]
 ppmi_1_PD1<-ppmi_1[ppmi_1$APPRDX!="SWEDD",]
 ppmi_1_PD1<-ppmi_1_PD1[,-c(1,302)]
@@ -244,7 +241,7 @@ ppmi_1_PD1$PD1<-as.factor(ppmi_1_PD1$PD1)
 ```
 
 
-####Balance cases####
+###Balance cases####
 ```{r}
 #PD1=PD PD2=PD+SWEDD
 set.seed(623)
@@ -297,10 +294,8 @@ write.csv(ppmi_1_PD1_balanced,"PD1_b.csv")
 write.csv(ppmi_1_PD2_balanced,"PD2_b.csv")
 ```
 
-
+###Prediction Functions
 ```{r}
-### Prediction functions ####
-# cv 5 functions
 library(crossval)
 #adaboost
 library(ada)
@@ -341,7 +336,7 @@ my.detree <- function (train.x, train.y, test.x, test.y, negative, formula){
   out <- confusionMatrix(test.y, predict.y, negative = negative)
   return (out)
 }
-##k-Nearest Neighbor ClassiÃ¯Â¬cation
+#k-Nearest Neighbor ClassiÃ¯Â¬cation
 
 library("class")
 my.knn <- function (train.x, train.y, test.x, test.y, negative, formula){
@@ -351,7 +346,7 @@ my.knn <- function (train.x, train.y, test.x, test.y, negative, formula){
   out <- confusionMatrix(test.y, predict.y, negative = negative)
   return (out)
 }
-## Kmeans
+# Kmeans
 my.kmeans <- function (train.x, train.y, test.x, test.y, negative, formula){
   train.matrix<-cbind(train.x,train.y)
   test.matrix<-cbind(test.x,test.y)
@@ -417,31 +412,43 @@ classfi<-function(a=my.ada){
   a1[4,]<-cv.out$stat
   a2[4,]<-out
   classification<-as.data.frame(cbind(a1,a2))
+  
   classification$Group<-c("PD1_un","PD2_un","PD1_b","PD2_b")
+  colnames(classification)[1:10]<-c("FP","TP","TN","FN","acc","sens","spec","ppv","npv","lor")
   write.csv(classification,"classification.csv")
   print(classification)
 }
 ```
 
-
 ### Classification result
+#### adaboost
 ```{r}
-# adaboost
 classfi()
-# detree
+```
+
+#### decision tree
+```{r}
 classfi(a=my.detree)
-#naive bayes
+```
+####naive bayes
+```{r}
 classfi(a=my.nb)
-#svm
+```
+####svm
+```{r}
 classfi(a=my.svm)
-# knn
+```
+#### knn
+```{r}
 classfi(a=my.knn)
-# kmeans
+```
+#### kmeans
+```{r}
 classfi(a=my.kmeans)
 ```
 
 
-####function dealt with dataset without UPDRS (and clinical features)
+###function dealt with dataset without UPDRS (and clinical features)
 ```{r}
 classfi1<-function(a=my.ada){
   a1<-matrix(NA,4,4)
@@ -494,20 +501,35 @@ classfi1<-function(a=my.ada){
   a1[4,]<-cv.out$stat
   a2[4,]<-out
   classification<-cbind(a1,a2)
+  colnames(classification)[1:10]<-c("FP","TP","TN","FN","acc","sens","spec","ppv","npv","lor")
   write.csv(classification,"classification2.csv")
   print(classification)
 }
-#adaboost
-classfi1(a=my.ada)
-#detree
+```
+
+#### adaboost
+```{r}
+classfi1()
+```
+
+#### decision tree
+```{r}
 classfi1(a=my.detree)
-#naive bayes
+```
+####naive bayes
+```{r}
 classfi1(a=my.nb)
-# svm
+```
+####svm
+```{r}
 classfi1(a=my.svm)
-# knn
+```
+#### knn
+```{r}
 classfi1(a=my.knn)
-# kmeans
+```
+#### kmeans
+```{r}
 classfi1(a=my.kmeans)
 ```
 
@@ -662,6 +684,7 @@ write.csv(PD1_score_noUPDRS,"trial5.csv")
 write.csv(PD2_score_noUPDRS,"trial6.csv")
 write.csv(PD1_score_b_noUPDRS,"trial7.csv")
 write.csv(PD2_score_b_noUPDRS,"trial8.csv")
+
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
