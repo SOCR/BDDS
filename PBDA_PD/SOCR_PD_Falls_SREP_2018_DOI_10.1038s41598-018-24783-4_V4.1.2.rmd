@@ -1,0 +1,3028 @@
+---
+title: "UMich SOCR PD Falls Project"
+subtitle: "<h2><u>TITLE</u></h2>"
+author: "<h3>SOCR/MIDAS (Chao, Ming, Tuo, Hanbo, others, Ivo Dinov)</h3>"
+date: "`r format(Sys.time(), '%B %Y')`"
+tags: [DSPA, SOCR, MIDAS, Big Data, Predictive Analytics] 
+output:
+  html_document:
+    code_folding: hide
+    theme: spacelab
+    highlight: tango
+    includes:
+      before_body: SOCR_header.html
+      after_body: SOCR_footer_tracker.html
+    toc: true
+    number_sections: true
+    toc_depth: 5
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+# Packages and dataset
+
+```{r}
+setwd("~/PD_Falls_UMich_N225/Final_RMD_Results")
+#packages
+library(gdata)
+library(mice)
+library(VIM)
+library(ggplot2)
+library(crossval)
+library(randomForest)
+library(caret)
+library(knockoff)
+library(dplyr)
+library(e1071)
+library(knitr)
+library(SuperLearner)
+library(tidyr)
+library(gridExtra)
+library(reshape2)
+library(GGally)
+library(akima)
+library(plotly)
+library(ada)
+library(xgboost)
+library(neuralnet)
+library(Rtsne)
+library(lavaan)
+library(cluster)
+library(matrixStats)
+library(mclust)
+library(plotROC)
+library(pROC)
+library(extrafont)
+library(ggthemes)
+
+font_import()
+loadfonts()
+#Udall
+##225 obs. of 207 variables (148 PD patients and 77 NC). Among 77 nc subjects, only 3 fell.
+ud <- read.xls(("Tight_Aggregate_Udall_2017_Falls_PIGD_Data.xlsx"), sheet = 1, header = TRUE)
+ud[ud == "."] <- NA
+write.csv(ud,"udall.csv",row.names = F)
+
+#TelAviv
+##105 obs of 199 variables. All PD patients.
+tel <- read.xls(("Clean_PD_PIGD_MetaImgData_Blank_April2017.xlsx"), sheet = 1, header = TRUE)
+#replace 998 and "di" as NA
+tel[which(tel == 998, arr.ind=TRUE)] <- NA
+tel[which(tel == "di", arr.ind=TRUE)] <- NA
+write.csv(tel,"telaviv.csv",row.names = F)
+```
+
+# Preprocessing
+## Udall Data
+
+```{r,warning=FALSE}
+ud0 <- read.csv("udall.csv")
+#Exclude subjects from normal control group. Use only PD patients' info for analysis.
+ud0 <- ud0[ud0$group == "pd",]
+
+#Missing plot (Figure 3)
+col_mis0 <- colnames(ud0)[colSums(is.na(ud0)) > 0]
+png("udall_missing plot.png", height = 1000, width = 2000, res=150)
+aggr_plot <- aggr(ud0[,colnames(ud0) %in% col_mis0], col=c('navyblue','yellow'), numbers=TRUE, sortVars=TRUE, labels=names(data), cex.axis=0.4, gap=0, ylab=c("Histogram of missing data (Michigan)", "Pattern"))
+aggr_plot
+dev.off()
+
+#Redundance:SubjIndex(1), group(3), HY.1(142), Mallampati(143),bp_s_sit(130),bp_s_sta(131),bp_d_sit(132),bp_d_sta(133)
+
+#Missingness:, FALLS_House(5), APOE genetic data(50:52), fat_pct(145), fat_rating(146), fall_house(148), dog(149), RT_TON(150), LT_TON(151)
+
+#Unbalanced class:dys_imp(112),bleed(116),encephalitis(117),seizure(118),liver(119) ,brain_sur(120), lupus(121),color_vision(144), prior_mi(125) 
+ud1 <- ud0[,-c(1,3,5,50:52,112,116:121,125,130:133,142:146,148:151)] #148 obs of 179 var
+
+#Data transformation
+ud1$gender <- as.factor(ifelse(ud1$gender=="m", 1, 2))
+ud1$SLEEP_RBD <- as.factor(ifelse(ud1$SLEEP_RBD=="yes", 2, 1))
+ud1$SLEEP_APNEA <- as.factor(ifelse(ud1$SLEEP_APNEA=="yes", 2, 1))
+ud1$head_inj <- as.factor(ifelse(ud1$head_inj=="y", 2, 1))
+ud1$anxiety <- as.factor(ifelse(ud1$anxiety=="y", 2, 1))
+ud1$depression <- as.factor(ifelse(ud1$depression=="y", 2, 1))
+ud1$high_bp <- as.factor(ifelse(ud1$high_bp=="y", 2, 1))
+ud1$headache <- as.factor(ifelse(ud1$headache=="y", 2, 1))
+ud1$hx_smoke <- as.factor(ifelse(ud1$hx_smoke == 1, 2, 1))
+ud1$DRD2_rs1076560_nr <- as.factor(ud1$DRD2_rs1076560_nr)
+ud1$DRD2_rs12364283_nr <- as.factor(ud1$DRD2_rs12364283_nr)
+ud1$DRD2_rs1799978_nr <- as.factor(ud1$DRD2_rs1799978_nr)
+ud1$DRD2_rs4350392_nr <- as.factor(ud1$DRD2_rs4350392_nr)
+ud1$DRD2_rs6277_nr <- as.factor(ud1$DRD2_rs6277_nr)
+ud1$DRD2_rs4648317_nr <- NULL #duplicate of DRD2_rs4350392_nr
+ud1$COMT_rs4646312_nr <- as.factor(ud1$COMT_rs4646312_nr)
+ud1$COMT_rs4646316_nr <- as.factor(ud1$COMT_rs4646316_nr)
+ud1$BDNF_rs6265_nr <- as.factor(ud1$BDNF_rs6265_nr)
+ud1$PPP1R1B_rs907094_nr <- as.factor(ud1$PPP1R1B_rs907094_nr)
+
+#NAs counts
+sort(sapply(ud1, function(x) { sum(is.na(x)) }), decreasing=TRUE)
+
+#imputation
+imputed_Data <- mice(ud1[,-c(1,124:179)], m=5, maxit = 5, seed = 2017)
+cat_num <- c(3,31,32,36:44,106:110,122)
+cont_num<-setdiff(c(1:122),cat_num)
+
+# deal with continuous first
+matrix_new<-as.data.frame(matrix(NA,ncol=122,nrow=148))
+for(i in 1:148){
+  for(j in cont_num){
+    vector_v<-NULL
+    for(k in 1:5){
+      vector_v[k]<-mice::complete(imputed_Data,k)[i,j]
+    }
+    matrix_new[i,j]<-median(vector_v)
+  }
+}
+
+set.seed(2017)
+for(i in 1:148){
+  for(j in 36:44){
+    vector_v<-NULL
+    for(k in 1:5){
+      vector_v[k]<-mice::complete(imputed_Data,k)[i,j]
+    }
+    matrix_new[i,j]<-sample(vector_v,1)
+  }
+}
+
+set.seed(2017)
+for(i in 1:148){
+  for(j in c(3,31,32,106:110,122)){
+    vector_v<-NULL
+    for(k in 1:5){
+      vector_v[k]<-mice::complete(imputed_Data,k)[i,j]
+    }
+    matrix_new[i,j]<-sample(vector_v-1,1)
+  }
+}
+
+names(matrix_new)<-colnames(mice::complete(imputed_Data,1))
+ud2 <- cbind(ud1$Subject_ID,matrix_new,ud1[,124:179])
+names(ud2)[1] <- "SubjectID"
+
+#binary variable for FALLS
+ud2$Fall <- as.factor(ifelse(ud2$FALLS > 0,1,0))
+ud2$FALLS <- NULL
+
+#Calculate MDS_motor_phenotype PIGD,TD,IN
+motor_phenotype <- ud2 %>% select(SubjectID,trem,postrem_r,postrem_l,kintrem_r,kintrem_l, trem_rue,trem_lue,trem_rle,trem_lle,trem_lip,const_trem,              walk,freeze,gait,freez,pos_stab)
+
+motor_phenotype$Tremor_mean <- rowMeans(motor_phenotype[,2:12])
+motor_phenotype$PIGD_mean <- rowMeans(motor_phenotype[,13:17])
+motor_phenotype$TD_PD_ratio <- motor_phenotype$Tremor_mean/motor_phenotype$PIGD_mean
+motor_phenotype$classification <- ifelse(motor_phenotype$TD_PD_ratio >= 1.15,"TD","IN")
+motor_phenotype[motor_phenotype$classification != "TD",]$classification <- 
+    ifelse(motor_phenotype[motor_phenotype$classification != "TD",]$TD_PD_ratio <= 0.9,"PI","IN")
+
+ud2$MDS_motor_phenotype <- as.factor(motor_phenotype$classification)
+ud2$MDS_TREM <- rowSums(motor_phenotype[,2:12])
+ud2$MDS_PIGD <- rowSums(motor_phenotype[,13:17])
+#gaitSpeed_Off = 8.5/time_walk
+ud2 <- ud2 %>% mutate(gaitSpeed_Off=8.5/time_walk) %>% select(-time_walk)
+#Weight and height unit transformation 
+ud2$weight <- ud2$weight*0.453592  #pounds to kg
+ud2$height <- ud2$height*2.54 #inches to cm
+#normalized dataset
+ud3 <- ud2
+ud3[,-c(1,3,30,31,35:43,105:109,121,178,179)] <- lapply(ud3[,-c(1,3,30,31,35:43,105:109,121,178,179)],scale)
+
+
+write.csv(ud2, "udall_complete.csv", row.names = FALSE) #148 obs.of 180 variables
+write.csv(ud3, "udall_norm_complete.csv", row.names = FALSE) #148 obs.of 180 variables
+
+#comparison between datasets before and after imputation
+#ud_p1 <- ggplot() + geom_density(aes(x=time_upgo), colour="blue", data=ud1) + 
+#  geom_density(aes(x=time_upgo), colour="orange", data=ud2)
+
+```
+
+##Tel-Aviv Univ Data 
+
+```{r}
+tel0 <- read.csv("telaviv.csv")
+#remove UPDRS partIII(on state), sum scores and "Background"
+tel0 <- tel0[,-c(86:119,143)] #105 obs of 164 variables
+sum(is.na(tel0)) #66 missing values in dataset.No missing in imaging data.
+
+#missing plot (Figure 3)
+col_mis0 <- colnames(tel0)[colSums(is.na(tel0)) > 0]
+png("telaviv_missing plot.png", height = 1000, width = 2000, res=150)
+aggr_plot <- aggr(tel0[,colnames(tel0) %in% col_mis0], col=c('navyblue','yellow'), numbers=TRUE, sortVars=TRUE, labels=names(data), cex.axis=0.5, gap=0,ylab=c("Histogram of missing data (Tel-Aviv)","Pattern"))
+aggr_plot
+dev.off()
+#remove two subjects with NAs in Fall_1_year
+tel1 <- tel0[!is.na(tel0$Fall_1_year),] #103 obs.
+
+names(tel1)[10] <- "height"
+
+#variable type transformation
+tel1$PredomiNAnt <- as.factor(tel1$PredomiNAnt)
+tel1$gender <- as.factor(tel1$gender)
+
+#PMM (Predictive Mean Matching) For numeric variables
+#without imaging data
+colnames(tel1)[colSums(is.na(tel1)) > 0]
+imputed_Data <- mice(tel1[,-c(1,92,109:164)], m=5, maxit = 5, method = 'pmm', seed = 2017)
+
+cat_num <- c(1,2,6)
+cont_num<-setdiff(c(1:106),cat_num)
+
+# deal with continuous first
+matrix_new<-as.data.frame(matrix(NA,ncol=106,nrow=103))
+for(i in 1:103){
+  for(j in cont_num){
+    vector_v<-NULL
+    for(k in 1:5){
+      vector_v[k]<-mice::complete(imputed_Data,k)[i,j]
+    }
+    matrix_new[i,j]<-median(vector_v)
+  }
+}
+
+set.seed(2017)
+for(i in 1:103){
+  for(j in cat_num){
+    vector_v<-NULL
+    for(k in 1:5){
+      vector_v[k]<-mice::complete(imputed_Data,k)[i,j]
+    }
+    matrix_new[i,j]<-sample(vector_v,1)
+  }
+}
+
+names(matrix_new)<-colnames(mice::complete(imputed_Data,1))
+
+#combine datasets
+tel2 <- cbind(tel1$SubjectID,matrix_new[,1:90],tel1[,92],matrix_new[,91:106],tel1[,c(109:164)])
+names(tel2)[c(1,10,46,92)] <- c("SubjectID","height","X3.14","sum_4")
+
+#sum_4 = 4.1 + 4.2 + 4.3 + 4.4 + 4.5 + 4.6
+tel2$sum_4 <- rowSums(tel2[,86:91])
+
+#binary variable for FALLS
+tel2$Fall <- as.factor(ifelse(tel2$Fall_1_year > 0,1,0))
+
+#Gender
+tel2$gender <- as.factor(ifelse(tel2$gender == 1,0,1))
+
+#Recalculate Group_PIGD
+tel_motor_phenotype <- tel1 %>% select(SubjectID,X2.10,X3.15a,X3.15b,X3.16a,X3.16b,X3.17a,X3.17b,X3.17c,X3.17d,X3.17e,X3.18,    X2.12,X2.13,X3.10gait_off,X3.11,X3.12pull_test_off)
+tel_motor_phenotype$Tremor_mean <- rowMeans(tel_motor_phenotype[,2:12])
+tel_motor_phenotype$PIGD_mean <- rowMeans(tel_motor_phenotype[,13:17])
+tel_motor_phenotype$TD_PD_ratio <- tel_motor_phenotype$Tremor_mean/tel_motor_phenotype$PIGD_mean
+tel_motor_phenotype$classification <- ifelse(tel_motor_phenotype$TD_PD_ratio >= 1.15,"TD","IN")
+tel_motor_phenotype[tel_motor_phenotype$classification != "TD",]$classification <- 
+    ifelse(tel_motor_phenotype[tel_motor_phenotype$classification != "TD",]$TD_PD_ratio <= 0.9,"PI","IN")
+
+tel2$Group_PIGD <- as.factor(tel_motor_phenotype$classification)
+#Recalculate Tremor_score and PIGD_score
+tel2$Tremor_score <- rowSums(tel_motor_phenotype[,2:12])
+tel2$PIGD_score <- rowSums(tel_motor_phenotype[,13:17])
+
+#Calculate BMI
+tel2$BMI <- tel2$weight / (tel2$height / 100)^2
+
+#normalized dataset
+tel3 <- tel2
+tel3[,-c(1:3,5,7,165)] <- lapply(tel3[,-c(1:3,5,7,165)],scale)
+
+#remove MMSE from dataset due to high correlation with MoCA
+tel2 <- tel2 %>% select(-MMSE)
+tel3 <- tel3 %>% select(-MMSE)
+
+#103 obs.of 165 variables
+write.csv(tel2,"telaviv_complete.csv", row.names = FALSE)
+write.csv(tel3,"telaviv_norm_complete.csv", row.names = FALSE)
+```
+
+## Udall & Tel Aviv Univ Aggregated Data
+
+```{r}
+#103 obs. of 165 variables
+telaviv <- read.csv("telaviv_complete.csv")
+#148 obs. of 180 variables
+udall <- read.csv("udall_complete.csv")
+
+#telaviv:103 obs of 133 variables
+telaviv1 <- telaviv[,c(1,2,6,4,7,8,9,10,165,15,19,21,24:85,93,95,108:164)] 
+#udall: 148 obs of 123 variables
+udall1 <- cbind(udall[,c(1,179,9,10,3,2,110:112,18,13,180,70:102,6,44:56,7,57:69,8,5,4,122:177,178)])
+
+colnames(udall1) <- colnames(telaviv1)
+tel_um <- rbind(telaviv1,udall1) #251 obs 133 variables
+
+#normlized dataset 
+tel_um1 <- tel_um
+tel_um1[,-c(1,2,5,133)] <- lapply(tel_um1[,-c(1,2,5,133)],scale)
+
+write.csv(tel_um,"tel_udall_complete.csv", row.names = FALSE)
+write.csv(tel_um1,"tel_udall_norm_complete.csv", row.names = FALSE)
+```
+
+
+# Analysis on Udall data
+## Exploratory Analysis
+
+```{r}
+ud <- read.csv("udall_complete.csv")
+ud$Fall <- as.factor(ud$Fall)
+# function definition
+my.heatmap <- function(x,order=F){
+  #heat map----
+  corr_mat <-  cor(x)
+  if (order){
+    # Use hierarchical clustering to order
+    dist_temp = as.dist(1-corr_mat)
+    hc = hclust(dist_temp)
+    corr_mat = corr_mat[hc$order, hc$order]
+  }
+  # Remove upper triangle
+  corr_mat_lower = corr_mat
+  corr_mat_lower[upper.tri(corr_mat_lower)] = NA
+  # Melt correlation matrix and make sure order of factor variables is correct
+  corr_mat_melted = melt(corr_mat_lower)
+  corr_mat_melted$Var1 = factor(corr_mat_melted$Var1, levels=colnames(corr_mat))
+  corr_mat_melted$Var2 = factor(corr_mat_melted$Var2, levels=colnames(corr_mat))
+  # Plot
+  corr_plot = ggplot(corr_mat_melted, aes(x=Var1, y=Var2, fill=value)) +
+    geom_tile(color='white') +
+    scale_fill_distiller(limits=c(-1, 1), palette='RdBu', na.value='white',
+                         name='Correlation') +
+    ggtitle('Correlations') +
+    coord_fixed(ratio=1) +
+    theme_minimal() +
+    scale_y_discrete(position="right") +
+    theme(axis.text.x=element_text(angle=45,size=12),
+          axis.text.y=element_text(size=12),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(),
+          panel.grid.major=element_blank(),
+          legend.position=c(0.1,0.9),
+          legend.justification=c(0,1))
+  corr_plot
+}
+
+
+#Box plot (Figure 2a)
+p1 <- ggplot(ud, aes(x = Fall, y = MDS_TREM, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw() +
+  scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  ylab("Tremor_score") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom")
+p2 <- ggplot(ud, aes(x = Fall, y = MDS_PIGD, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw()+
+  scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  ylab("PIGD_score") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom") 
+p3 <- ggplot(ud, aes(x = Fall, y = HY, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw()  +
+  scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  ylab("H and Y scale") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom") 
+p4 <- ggplot(ud, aes(x = Fall, y = gaitSpeed_Off, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw()+
+    scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom") 
+png("ud_Box_Plot.png",width = 800,height = 300)
+grid.arrange(p1,p2,p3,p4,ncol = 4)
+dev.off()
+
+
+# heatmap (Table 2)
+## draw correlation heat map for selected variable
+png("ud_heatmap.pdf", height = 600, width = 600)
+ud_vis <- select(ud,time_walk, MDS_PIGD, Striatum_DA, MOT_EDL, NON_MOTOR_EDL, pos_stab, walk,Fall)
+my.heatmap(ud_vis)
+dev.off()
+
+# paired plot for critical features (Table 5a)
+udud <- select(ud,MDS_motor_phenotype,MDS_TREM,MDS_PIGD,gaitSpeed_Off,MOCA,Fall) %>% mutate(Fall=as.factor(ud$Fall))
+png("ud_paired_plot.png", height = 600, width = 600)
+p <- ggpairs(udud,columnLabels = c("PD_Subtype","Tremor_score","PIGD_score","gaitSpeed_Off","MoCA","Fall"),mapping=aes(color=Fall))
+p
+dev.off()
+
+ud0 = ud[ud$Fall==0,c("MDS_PIGD","time_upgo","MOT_EDL","HY")]
+ud1 = ud[ud$Fall==1,c("MDS_PIGD","time_upgo","MOT_EDL","HY")]
+for (i in 1:4){
+  print(wilcox.test(ud0[,i],ud1[,i])$p.value)
+}
+
+#plotly (Table 4a)
+my.plotly <- function(dp,d0,d1){
+  sp=interp(dp$MOT_EDL,dp$gaitSpeed_Off,dp$MDS_PIGD,duplicate = T)
+  s0=interp(d0$MOT_EDL,d0$gaitSpeed_Off,d0$MDS_PIGD,duplicate = T)
+  s1=interp(d1$MOT_EDL,d1$gaitSpeed_Off,d1$MDS_PIGD,duplicate = T)
+  p <- plot_ly(z=(sp$z), type="surface", showscale=FALSE,colorscale="salmon") %>%
+    add_trace(z=(s0$z), type="surface", showscale=FALSE, opacity=0.95) %>%
+    add_trace(z=(s1$z), type="surface", showscale=FALSE, opacity=0.95) 
+}
+
+##plotly of clinical features for tel data
+dp <- ud[,c("MDS_PIGD","gaitSpeed_Off","MOT_EDL")]
+d0 <- dp[ud$Fall==0,]
+d1 <- dp[ud$Fall!=0,]
+(p1 <- my.plotly(dp,d0,d1) %>%
+  layout(title = "Surface Plot for Clinical Features", 
+         xaxis = list(title = "FOG_Q",showgrid = F),
+         yaxis = list(title = "gaitSpeed_Off",showgrid = F)))
+
+```
+
+## Feature Selection
+
+```{r}
+ud <- read.csv("udall_norm_complete.csv")
+ud <- ud[,-c(1,35:43,110,111,179)]
+cat_num <- c(2,29,30,95:99,109,166)
+ud[,cat_num] <- lapply(ud[,cat_num],as.factor)
+
+#Random Forest (500 iterations)
+N <- 500
+control <- trainControl(method="cv", number=5)
+set.seed(2017)
+ud_var_lst <- c()
+for (i in 1:N){
+    samples <- sample(1:148, 0.632*nrow(ud),replace = T)
+    rf_mod <- train(Fall~., data=ud[samples,], method="rf", trControl=control, allowParallel=TRUE)
+    imp_temp <- as.data.frame(varImp(rf_mod)$importance) #%IncMSE
+    imp_temp$var <- row.names(imp_temp)
+    names(imp_temp) <- c("imp","var")
+    imp_temp$imp <- as.numeric(as.character(imp_temp$imp))
+    ud_var_lst <- c(ud_var_lst,imp_temp[order(-imp_temp$imp),]$var[1:20]) #top 20
+}
+
+ud_counts_rf <- as.data.frame(sort(table(ud_var_lst),decreasing=T)[1:20])
+names(ud_counts_rf) <- c("Features","Frequency")
+ud_counts_rf <- ud_counts_rf %>% mutate(Prop = Frequency/500)
+#Table 4
+write.csv(ud_counts_rf,"ud_feature_selection_rf.csv",row.names = F) 
+
+#Figure 11
+png("rf_ud_feature_selection.png", height = 800, width = 2000,res = 200)
+ggplot(ud_counts_rf,aes(reorder(Features,-Frequency),Frequency)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("Features") + ggtitle("Feature Selection by Random Forests (Michigan)") +theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+#knockoff (1000 iterations)
+ud <- read.csv("udall_norm_complete.csv")
+my.bt.ko <- function(X,Y,fdr=0.3,r=0.632,mtry=30,iter=500,random=T){
+  counts <- NULL
+  print(dim(X))
+  nc <- ncol(X)
+  for (i in 1:iter){
+    if(i%%100 ==0){print(i)}
+    bt.id <- sample(1:nc,mtry,replace = F)
+    ko_var <- NULL
+    try(ko_var <- knockoff.filter(X[,bt.id],fdr=fdr,Y,randomize = random))
+    if (length(ko_var$selected)!=0){counts <- c(counts,bt.id[as.numeric(ko_var$selected)])}
+  }
+  sort(table(counts),decreasing = T)
+}
+set.seed(2017)
+counts_ko_ud <- my.bt.ko(ud[,-c(1,35:43,110,111,178,179)],ud[,178],mtry=40,fdr=0.35,iter=1000)
+nm_ud <- colnames(ud)[-c(1,35:43,110,111,178,179)]
+ 
+counts_ko_ud <- data.frame(Feature=nm_ud[names(counts_ko_ud)%>% as.numeric()],Frequency=counts_ko_ud %>% as.matrix())
+#proportion 
+#40 is mtry(number of column selected by each iteration)
+counts_ko_ud <- counts_ko_ud[1:20,] %>% mutate(Prop=Frequency/1000*(166/40))  
+#Table 4
+write.csv(counts_ko_ud,"ud_feature_selection_ko.csv",row.names = F)
+#Figure 11
+png("ko_ud_feature_selection.png", height = 800, width = 2000,res = 200)
+ggplot(counts_ko_ud[1:20,],aes(reorder(Feature,-Frequency),Frequency)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("Features") + ggtitle("Feature Selection by Knockoff (Michigan)")+theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+
+########################Tests (Table 5)########################
+ud <- read.csv("udall_complete.csv") 
+####Wilcoxon-test
+wilcox.test(MDS_PIGD~Fall,ud)
+wilcox.test(gaitSpeed_Off~Fall,ud)
+wilcox.test(MOT_EDL~Fall,ud)
+wilcox.test(NON_MOTOR_EDL~Fall,ud)
+wilcox.test(walk~Fall,ud)
+wilcox.test(pos_stab~Fall,ud)
+####KS-test
+ks.test(ud[ud$Fall==1,]$MDS_PIGD,ud[ud$Fall==0,]$MDS_PIGD)
+ks.test(ud[ud$Fall==1,]$gaitSpeed_Off,ud[ud$Fall==0,]$gaitSpeed_Off)
+ks.test(ud[ud$Fall==1,]$MOT_EDL, ud[ud$Fall==0,]$MOT_EDL)
+ks.test(ud[ud$Fall==1,]$NON_MOTOR_EDL,ud[ud$Fall==0,]$NON_MOTOR_EDL)
+ks.test(ud[ud$Fall==1,]$walk,ud[ud$Fall==0,]$walk)
+ks.test(ud[ud$Fall==1,]$pos_stab,ud[ud$Fall==0,]$pos_stab)
+```
+
+## Predict Fall with all features
+
+```{r}
+ud <- read.csv("udall_norm_complete.csv")
+ud <- ud[,-c(1,110,111,179)]
+X_sl <- ud[,-175]
+Y_sl <- ud[,175]
+cat_num <- c(2,29,30,34:42,104:108,118,175)
+for (i in cat_num) {
+    ud[,i] <- as.factor(ud[,i])
+}
+
+
+X <- ud[, -175]
+Y <- ud[, 175]
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf <- function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+
+
+#cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "radia") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with All Features (Udall)")
+#Table 10
+write.csv(results,"ud_fall_prediction_all_features.csv",row.names = F)
+```
+
+## Predict Fall with selected features
+
+```{r}
+ud <- read.csv("udall_norm_complete.csv")
+ud <- ud[,c("MDS_PIGD", "gaitSpeed_Off","MOT_EDL", "NON_MOTOR_EDL", "walk", "pos_stab","Fall")]
+X_sl <- ud[,-7]
+Y_sl <- ud[,7]
+ud$Fall <- as.factor(ud$Fall)
+
+X <- ud[, -7]
+Y <- ud[, 7]
+
+#Density plot (Figure 12)
+density_plots <- function(df){
+    top <- select(df, one_of(names(df)))
+    top_0 <- filter(top, Fall == "0")
+    top_1 <- filter(top, Fall == "1")
+    wide <- rbind(top_0, top_1)
+    long <- gather(wide, key = Variable, value = Value, MDS_PIGD:pos_stab)
+    long$Variable <- factor(long$Variable, levels = c("MDS_PIGD", "gaitSpeed_Off","MOT_EDL", "NON_MOTOR_EDL", "walk","pos_stab"))
+    ggplot(long, aes(x = Value)) + 
+    geom_density(aes(fill = Fall), alpha = 0.4) + 
+    theme_bw() + facet_wrap(~Variable, nrow = 2,scales = "free") +
+         scale_fill_manual(values=c("#000099", "#FF9933")) + 
+    theme_hc(base_family = "Times New Roman") +
+    xlab("The value of the top six features using RF and KO") +
+    labs( fill = "Fall or No Fall")
+}
+ud_temp <- read.csv("udall_complete.csv")
+ud_temp <- ud_temp %>% select(MDS_PIGD, gaitSpeed_Off,MOT_EDL, NON_MOTOR_EDL, walk,pos_stab, Fall) %>% mutate(Fall=as.factor(Fall))
+pdf("ud_feature_density.pdf",height = 4, width = 8 , family='Times New Roman')
+density_plots(ud_temp)
+dev.off()
+
+#setup pred functions
+##Logistic Regression
+my.logit = function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf = function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+
+#cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "linear")
+#cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "radia")
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with Selected Features (Udall)")
+#Table 11
+write.csv(results,"ud_fall_prediction_selected_features.csv",row.names = F)
+```
+
+
+## Udall:TD/PIGD and Fall
+
+```{r}
+ud <- read.csv("udall_norm_complete.csv")
+ud <- ud[,c(2:4,13:34,105:109,112:121,179,180,178)]
+ud[,c(2,21,22,26:30,40,41,43)] <- lapply(ud[,c(2,21,22,26:30,40,41,43)],as.factor)
+
+X <- ud[, -43]
+Y <- ud[, 43]
+
+#setup pred functions
+##Logistic Regression
+my.logit = function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf = function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+
+#cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost"), rbind(logit_result,rf_result,ada_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with Selected Features+TD/PIGD (Udall)")
+#Table 24
+write.csv(results,"ud_fall_prediction_TDPIGD.csv",row.names = F)
+```
+
+# Analysis on TelAviv data
+## Exploratory Analysis
+
+```{r}
+tel <- read.csv("telaviv_complete.csv")
+tel$Fall <- as.factor(tel$Fall)
+
+#Box plot (Figure 2b)
+p1 <- ggplot(tel, aes(x = Fall, y = Tremor_score, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw() +
+  scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom")
+p2 <- ggplot(tel, aes(x = Fall, y = PIGD_score, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw()+
+  scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom") 
+p3 <- ggplot(tel, aes(x = Fall, y = H_and_Y_OFF, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw()  +
+  scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  ylab("H and Y scale") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom") 
+p4 <- ggplot(tel, aes(x = Fall, y = FOG_Q, fill = Fall)) + 
+  geom_boxplot(alpha = 0.5) + theme_bw()+
+    scale_fill_manual(values=c("#000099", "#FF9933")) +
+  xlab("No Fall vs Fall") +
+  labs( fill = "No Fall/Fall")+
+  theme(legend.position="bottom") 
+png("tel_Box_Plot.png",width = 800,height = 300)
+grid.arrange(p1,p2,p3,p4,ncol = 4)
+dev.off()
+
+## draw correlation heat map for selected variable (Table 2)
+tel_vis <- select(tel,gaitSpeed_Off, ABC, BMI, PIGD_score, X2.11, partII_sum, Attention, DGI, FOG_Q, H_and_Y_OFF)
+png("tel_heatmap.png", height = 600, width = 600)
+my.heatmap(tel_vis)
+dev.off()
+
+
+# paired plot for clinical features (Table 5b)
+teltel <- select(tel,Group_PIGD,PIGD_score,Tremor_score,gaitSpeed_Off, MoCA, Fall) %>% mutate(Fall=as.factor(tel$Fall))
+png("tel_paired_plot.png", height = 600, width = 600)
+p <- ggpairs(teltel,columnLabels = c("PD_Subtype","Tremor_score","PIGD_score","gaitSpeed_Off","MoCA","Fall"),mapping=aes(color=Fall))
+p
+dev.off()
+
+# Wilcoxon test on neuroimaging data TD vs PIGD
+tel_img <- tel[,c(2,108:163)]
+tel_img[,2:57] <- lapply(tel_img[,2:57],scale)
+
+p <- c()
+for(i in 2:57){
+    test <- wilcox.test(tel_img[tel_img$Group_PIGD=="TD",i],tel_img[tel_img$Group_PIGD=="PI",i])
+    p <- c(p, test$p.value)
+}
+names(tel_img[,2:57])[which(p<0.05)]
+
+#Table 5b
+my.plotly <- function(dp,d0,d1){
+  sp=interp(dp$FOG_Q,dp$gaitSpeed_Off,dp$PIGD_score,duplicate = T)
+  s0=interp(d0$FOG_Q,d0$gaitSpeed_Off,d0$PIGD_score,duplicate = T)
+  s1=interp(d1$FOG_Q,d1$gaitSpeed_Off,d1$PIGD_score,duplicate = T)
+  p <- plot_ly(z=(sp$z), type="surface", showscale=FALSE,colorscale="salmon") %>%
+    add_trace(z=(s0$z), type="surface", showscale=FALSE, opacity=0.95) %>%
+    add_trace(z=(s1$z), type="surface", showscale=FALSE, opacity=0.95) 
+}
+
+# plotly of clinical features for tel data
+dp <- tel[,c("PIGD_score","gaitSpeed_Off","FOG_Q")]
+d0 <- dp[tel$Fall==0,]
+d1 <- dp[tel$Fall!=0,]
+(p1 <- my.plotly(dp,d0,d1) %>%
+  layout(title = "Surface Plot for Clinical Features", 
+         xaxis = list(title = "FOG_Q",showgrid = F),
+         yaxis = list(title = "gaitSpeed_Off",showgrid = F)))
+
+# MDS Projection (Figure 7)
+tel <- read.csv("telaviv_norm_complete.csv") %>% mutate(Fall=as.factor(Fall))
+X_n <- tel %>% select(-SubjectID,-Group_PIGD,-PredomiNAnt,-Fall_1_year)
+dis <- dist(X_n)
+mds <- as.data.frame(cmdscale(dis, k=2))
+pdf("MDS Projection fall or not.pdf", height = 6, width = 6,family='Times New Roman')
+ggplot(mds, aes(x=V2, y=V1)) + 
+  geom_point(aes(color=tel$Fall),alpha=0.8,size = 2.5, alpha=0.8) +     
+  ggtitle("Fall vs Non-Fall") +
+  scale_color_manual(values=c("#000099", "#FF9933")) +
+  theme_minimal()+
+  labs( color = "Fall or No Fall")
+dev.off()
+```
+
+## Feature Selection
+
+```{r}
+tel <- read.csv("telaviv_norm_complete.csv")
+tel <- tel[,-c(1,2,3,5,9,10,22,23)]
+cat_num <- c(3,156)
+tel[,cat_num] <- lapply(tel[,cat_num],as.factor)
+
+#Feature selection (N= 500)
+N <- 500
+control <- trainControl(method="cv", number=5)
+set.seed(2017)
+tel_var_lst <- c()
+for (i in 1:N){
+    samples <- sample(1:103, 0.632*nrow(tel),replace = T)
+    rf_mod <- train(Fall~., data = tel[samples,], method="rf", trControl = control, allowParallel = TRUE)
+    imp_temp <- as.data.frame(varImp(rf_mod)$importance) #%IncMSE
+    imp_temp$var <- row.names(imp_temp)
+    names(imp_temp) <- c("imp","var")
+    imp_temp$imp <- as.numeric(as.character(imp_temp$imp))
+    tel_var_lst <- c(tel_var_lst,imp_temp[order(-imp_temp$imp),]$var[1:20]) #top 20
+}
+
+tel_counts_rf <- as.data.frame(sort(table(tel_var_lst),decreasing=T)[1:20])
+names(tel_counts_rf) <- c("Features","Frequency")
+tel_counts_rf <- tel_counts_rf %>% mutate(Prop = Frequency/500)
+#Table 6
+write.csv(tel_counts_rf,"tel_feature_selection_rf.csv",row.names = F)
+# Figure 13
+png("rf_tel_feature_selection.png", height = 800, width = 2000,res = 200)
+ggplot(tel_counts_rf,aes(reorder(Features,-Frequency),Frequency)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("Features") + ggtitle("Feature Selection by Random Forests (Tel-Aviv)")+theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+#knockoff
+tel <- read.csv("telaviv_norm_complete.csv")
+set.seed(2017)
+counts_ko_tel <- my.bt.ko(tel[,-c(1,2,3,5,9,10,22,23,164)],tel[,164],mtry=40,fdr=0.35,iter=1000)
+nm_tel <- colnames(tel)[-c(1,2,3,5,9,10,22,23,164)]
+counts_ko_tel <- data.frame(Feature=nm_tel[names(counts_ko_tel)%>% as.numeric()],Frequency=counts_ko_tel %>% as.matrix())
+#proportion 
+counts_ko_tel <- counts_ko_tel[1:20,] %>% mutate(Prop=Frequency/1000*(156/40))  
+#40 is mtry(number of column selected by each iteration)  (Table 6)
+write.csv(counts_ko_tel,"tel_feature_selection_ko.csv",row.names = F)
+
+#Figure 13
+png("ko_tel_feature_selection.png", height = 800, width = 2000,res = 200)
+ggplot(counts_ko_tel[1:20,],aes(reorder(Feature,-Frequency),Frequency)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(size=3,angle = 45, hjust = 1)) + xlab("Features") + ggtitle("Feature Selection by Knock Off (Tel-Aviv)")+theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+########################Tests (Table 7)########################
+#gaitSpeed_Off, ABC, BMI, PIGD_score, cerebellum, X2.11, partII_sum, Attention, DGI, Tremor_score, FOG_Q, R_fusiform_gyrus, H_and_Y_OFF.
+tel <- read.csv("telaviv_complete.csv") 
+####Wilcoxon-test
+wilcox.test(gaitSpeed_Off~Fall,tel)
+wilcox.test(ABC~Fall,tel)
+wilcox.test(BMI~Fall,tel)
+wilcox.test(PIGD_score~Fall,tel)
+wilcox.test(cerebellum~Fall,tel)
+wilcox.test(X2.11~Fall,tel)
+wilcox.test(partII_sum~Fall,tel)
+wilcox.test(Attention~Fall,tel)
+wilcox.test(DGI~Fall,tel)
+wilcox.test(Tremor_score~Fall,tel)
+wilcox.test(FOG_Q~Fall,tel)
+wilcox.test(R_fusiform_gyrus~Fall,tel)
+wilcox.test(H_and_Y_OFF~Fall,tel)
+
+
+####KS-test
+ks.test(tel[tel$Fall==1,]$gaitSpeed_Off,tel[tel$Fall==0,]$gaitSpeed_Off)
+ks.test(tel[tel$Fall==1,]$ABC,tel[tel$Fall==0,]$ABC)
+ks.test(tel[tel$Fall==1,]$BMI,tel[tel$Fall==0,]$BMI)
+ks.test(tel[tel$Fall==1,]$PIGD_score, tel[tel$Fall==0,]$PIGD_score)
+ks.test(tel[tel$Fall==1,]$cerebellum,tel[tel$Fall==0,]$cerebellum)
+ks.test(tel[tel$Fall==1,]$X2.11,tel[tel$Fall==0,]$X2.11)
+ks.test(tel[tel$Fall==1,]$partII_sum,tel[tel$Fall==0,]$partII_sum)
+ks.test(tel[tel$Fall==1,]$Attention,tel[tel$Fall==0,]$Attention)
+ks.test(tel[tel$Fall==1,]$DGI,tel[tel$Fall==0,]$DGI)
+ks.test(tel[tel$Fall==1,]$Tremor_score,tel[tel$Fall==0,]$Tremor_score)
+ks.test(tel[tel$Fall==1,]$FOG_Q,tel[tel$Fall==0,]$FOG_Q)
+ks.test(tel[tel$Fall==1,]$R_fusiform_gyrus,tel[tel$Fall==0,]$R_fusiform_gyrus)
+ks.test(tel[tel$Fall==1,]$H_and_Y_OFF,tel[tel$Fall==0,]$H_and_Y_OFF)
+```
+
+## Predict Fall with all features
+
+```{r}
+tel <- read.csv("telaviv_norm_complete.csv")
+tel <- tel[,-c(1,2,3,5,9,10,22,23)]
+X_sl <- tel[,-156]
+Y_sl <- tel[,156]
+cat_num <- c(3,156)
+for (i in cat_num) {
+    tel[,i] <- as.factor(tel[,i])
+}
+
+
+X <- tel[, -156]
+Y <- tel[, 156]
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+
+##Random Forests
+Y_rf <- Y
+levels(Y_rf) <- make.names(levels(Y_rf))
+###Parameter tuning--mtry = 115
+ctrl<-trainControl(method="cv", number=5,allowParallel = TRUE)
+grid_rf<-expand.grid(.mtry=seq(40,150,by = 5))
+set.seed(2017)
+#for (k in c(0.5,0.6,0.7,0.8,0.9)){
+#    print(k)
+m_rf <- caret::train(x=X,y=Y_rf,method = "rf", metric = "Accuracy", trControl = ctrl,tuneGrid = grid_rf,negative="X0")
+m_rf$results
+#    print(m_rf$results)
+#}
+
+
+my.rf <- function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y, mtry = 115)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...,mtry = 115)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+
+# cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "radia") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall prediction with all features (TelAviv)")
+#Table 12
+write.csv(results,"tel_fall_prediction_all_features.csv",row.names = F)
+```
+
+## Predict Fall with selected features
+
+```{r}
+tel <- read.csv("telaviv_norm_complete.csv")
+tel <- tel[, c("gaitSpeed_Off", "ABC", "BMI", "PIGD_score", "X2.11", "partII_sum", "Attention", "DGI", "FOG_Q", "H_and_Y_OFF","Fall")]
+X_sl <- tel[,-11]
+Y_sl <- tel[,11]
+tel$Fall <- as.factor(tel$Fall)
+
+X <- tel[, -11]
+Y <- tel[, 11]
+
+#Density plot (Figure 14)
+density_plots <- function(df){
+    top <- select(df, one_of(names(df)))
+    top_0 <- filter(top, Fall == "0")
+    top_1 <- filter(top, Fall == "1")
+    wide <- rbind(top_0, top_1)
+    long <- gather(wide, key = Variable, value = Value, gaitSpeed_Off:H_and_Y_OFF)
+    long$Variable <- factor(long$Variable, levels = c("gaitSpeed_Off", "ABC", "BMI", "PIGD_score", "X2.11", "partII_sum", "Attention", "DGI", "FOG_Q", "H_and_Y_OFF"))
+    ggplot(long, aes(x = Value)) + 
+    geom_density(aes(fill = Fall), alpha = 0.4) + 
+    theme_bw() + facet_wrap(~Variable, nrow = 2,scales = "free") + 
+        scale_fill_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_family = "Times New Roman") +
+    xlab("The value of the top six features using RF and KO") +
+    labs( fill = "Fall or No Fall")
+}
+  
+tel_temp <- read.csv("telaviv_complete.csv")
+tel_temp <- tel_temp %>% select(gaitSpeed_Off, ABC, BMI, PIGD_score, X2.11, partII_sum, Attention, DGI, FOG_Q, H_and_Y_OFF, Fall) %>% mutate(Fall=as.factor(Fall))
+pdf("tel_feature_density.pdf",height = 5, width = 10, family='Times New Roman')
+density_plots(tel_temp)
+dev.off()
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf <- function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+# cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "linear") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with Selected Features (TelAviv)")
+#Table 13
+write.csv(results,"tel_fall_prediction_selected_features.csv",row.names = F)
+
+```
+
+## Tel-Aviv:TD/PIGD and Fall
+
+```{r}
+tel <- read.csv("telaviv_norm_complete.csv")
+tel <- tel[,c(2,7,8,165,11:21,94:107,164)]
+#tel <- tel[, c("Group_PIGD","gaitSpeed_Off", "ABC", "BMI", "PIGD_score", "X2.11", "partII_sum", "Attention", "DGI", "FOG_Q", "H_and_Y_OFF","Fall")]
+tel[,c(1,2,30)] <- lapply(tel[,c(1,2,30)],as.factor)
+X <- tel[, -30]
+Y <- tel[, 30]
+
+#setup pred functions
+##Logistic Regression
+my.logit = function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf = function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+
+#cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost"), rbind(logit_result,rf_result,ada_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with Selected Features+TD/PIGD (Tel)")
+#Table 25
+write.csv(results,"tel_fall_prediction_TDPIGD.csv",row.names = F)
+```
+
+
+## Further improve the sensitivity
+
+```{r}
+#`mtry` and `cutoff` are very important.
+# `classwt` have slight effect.
+# `ntree` hae no effect as long as reasonable.
+##Random Forests
+my.rf <- function(train.x, train.y, test.x, test.y,cutoff=c(0.5,0.5),mtry=3) {
+    rf.fit = randomForest(x=train.x, y=train.y,cutoff=cutoff,mtry=mtry)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+tel <- read.csv("telaviv_norm_complete.csv")
+tel <- tel[,c("gaitSpeed_Off", "ABC", "BMI", "PIGD_score", "X2.11", "partII_sum", "Attention", "DGI", "FOG_Q", "H_and_Y_OFF","Fall")]
+X <- tel[,-11]
+Y <- tel[,11] %>% as.factor()
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F,cutoff=c(0.6,0.4),mtry=3)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+#Table 14
+write.csv(rf_result,"rf_improve_sensitivity_tel.csv",row.names = F)
+```
+
+## Latent variable model (Supplementary Table 2)
+
+```{r}
+my.rf <- function (train.x, train.y, test.x, test.y,ntree=1000,mtry=75,cutoff=c(0.65,0.35),classwt=c(1,1),negative=0){
+  rf.fit <- randomForest(x=train.x,y=train.y,importance=TRUE, 
+  ntree=ntree,mtry = mtry,cutoff = cutoff,classwt = classwt)
+  predict.y <- predict(rf.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = negative)
+  return (out)
+}
+
+tel <- read.csv("telaviv_norm_complete.csv")
+Y <- tel$Fall %>% as.factor()
+my_rf_X = function(df){
+  set.seed(2017)
+  cv.out_T <- crossval::crossval(my.rf, df, Y, K = 5, B = 1,cutoff=c(.5,.5),verbose = F,mtry=2)
+  out_ada_T <- diagnosticErrors(cv.out_T$stat)
+  
+}
+
+df0 <- tel %>% select(PIGD_score,Tremor_score,FOG_Q,H_and_Y_OFF,gaitSpeed_Off)
+out_0 <- my_rf_X(df0)
+out_0
+
+# get a latent clinical feature
+df <- cbind(df0,Y)
+model1 <-'
+Super Clinical =~ PIGD_score+Tremor_score
+'
+fit<-cfa(model1, data=df)
+summary(fit, fit.measures=TRUE)
+
+#Supplementary Table 2
+# super clinical feature performance
+df2 <- cbind(clinical = tel$PIGD_score - 0.563*tel$Tremor_score, tel$FOG_Q,tel$H_and_Y_OFF,tel$gaitSpeed_Off) %>% as.data.frame()
+out_2 <- my_rf_X(df2)
+out_2
+write.csv(out_2,"latent_output.csv",row.names = F)
+
+# as comparison - direct use all clinical features
+df1 <- tel %>% select(PIGD_score,Tremor_score,FOG_Q,H_and_Y_OFF,gaitSpeed_Off)
+out_1 <- my_rf_X(df1)
+out_1
+write.csv(out_1,"latent_output_comparison.csv",row.names = F)
+```
+
+## Prediction using very small number of features
+
+```{r}
+#dfdf <- tel %>% select(PIGD_score,H_and_Y_OFF,gaitSpeed_Off)
+#set.seed(2017)
+#cv.out.logit <- crossval::crossval(my.logit, dfdf, tel$Fall%>%as.factor(), K = 5, B = 1,verbose = F)
+#logit_result <- diagnosticErrors(cv.out.logit$stat)
+
+
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, select(tel,FOG_Q,gaitSpeed_Off,PIGD_score,H_and_Y_OFF), tel$Fall%>%as.factor(), K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+
+logit_result
+#Table 15
+write.csv(logit_result,"tel_logit_4features.csv",row.names = F)
+```
+
+## ROC curve and AUC
+
+```{r}
+tel <- read.csv("telaviv_norm_complete.csv")
+tel <- tel[,-c(1,3,5,9,10,22,23)]
+X_sl <- tel[,-157]
+Y_sl <- tel[,157]
+cat_num <- c(1,4,157)
+for (i in cat_num) {
+    tel[,i] <- as.factor(tel[,i])
+}
+X <- tel[, -157]
+Y <- tel[, 157] %>% as.factor()
+
+X_all_features = X[,-1]
+X_TDPIGD = X[,c(1,4:16,86:156,157)]
+X_updrs = X[,-c(1:3,19:87)]
+X_imn = X[,101:156]
+X_sel = X[,c("gaitSpeed_Off", "ABC", "BMI", "PIGD_score", "X2.11", "partII_sum", "Attention", "DGI", "FOG_Q", "H_and_Y_OFF")]
+X_4 = X[,c("PIGD_score", "gaitSpeed_Off", "FOG_Q","H_and_Y_OFF")]
+
+
+set.seed(2017)
+tr = sample(1:nrow(X),0.7*nrow(X))
+Y_tr = Y[tr]
+Y_ts = Y[-tr]
+
+# predict all covariates
+X_tr = X_all_features[tr,]
+X_ts = X_all_features[-tr,]
+set.seed(2017)
+rf_all <- randomForest(x=X_tr, y=Y_tr)
+pred_all <- predict(rf_all, X_ts,type = "prob")
+
+# predict TD/PIGD
+X_tr = X_TDPIGD[tr,]
+X_ts = X_TDPIGD[-tr,]
+set.seed(2017)
+rf_wp <- randomForest(x=X_tr, y=Y_tr)
+pred_wp <- predict(rf_wp, X_ts,type = "prob")
+
+# predict w/o UPDRS
+X_tr = X_updrs[tr,]
+X_ts = X_updrs[-tr,]
+set.seed(2017)
+rf_wl <- randomForest(x=X_tr, y=Y_tr)
+pred_wl <- predict(rf_wl, X_ts,type = "prob")
+
+# predict only image
+X_tr = X_imn[tr,]
+X_ts = X_imn[-tr,]
+set.seed(2017)
+rf_im <- randomForest(x=X_tr, y=Y_tr)
+pred_im <- predict(rf_im, X_ts,type = "prob")
+
+
+# predict with selected variables
+X_tr = X_sel[tr,]
+X_ts = X_sel[-tr,]
+set.seed(2017)
+rf_sel <- randomForest(x=X_tr, y=Y_tr)
+pred_sel <- predict(rf_sel, X_ts,type = "prob")
+
+# predict with only 4 vital covariates
+X_tr = X_4[tr,]
+X_ts = X_4[-tr,]
+rf_4 <- randomForest(x=X_tr, y=Y_tr)
+pred_4 <- predict(rf_4, X_ts,type = "prob")
+
+
+# compute AUC
+roc_obj1 <- roc(Y_ts, pred_all[,2])
+auc(roc_obj1)
+roc_obj2 <- roc(Y_ts, pred_wp[,2])
+auc(roc_obj2)
+roc_obj3 <- roc(Y_ts, pred_wl[,2])
+auc(roc_obj3)
+roc_obj4 <- roc(Y_ts, pred_im[,2])
+auc(roc_obj4)
+roc_obj5 <- roc(Y_ts, pred_sel[,2])
+auc(roc_obj5)
+roc_obj6 <- roc(Y_ts, pred_4[,2])
+auc(roc_obj6)
+# same for pred_all,...
+
+#plot roc
+ttp = as.numeric(Y_ts)-1
+#Table 16
+dt <- data.frame(D = ttp, M1 = pred_all[,2],M2=pred_wp[,2],M3=pred_wl[,2],M4=pred_im[,2],
+                 M5 = pred_sel[,2],M6=pred_4[,2])
+colnames(dt) <- c("D","All Features","TD/PIGD+Others","Remove All UPDRS Items","Neuroimaging Features Only","Selected Features","4 Vital Features")
+dt <- melt(dt,id.vars = "D")
+basicplot <- ggplot(dt, aes(d = D, m = value, colour=variable)) + 
+  geom_roc(labels = FALSE, size = 1, alpha = 0.6, linejoin = "mitre") +  
+  theme_bw() + coord_fixed(ratio = 1) + style_roc() + ggtitle("Random Forest ROC CURVE (Tel-Aviv data)")+ theme(plot.title = element_text(size=25),axis.text.x = element_text(size=15), axis.text.y = element_text(size=15), axis.title.x = element_text(size=20),axis.title.y = element_text(size=20),legend.text=element_text(size=18),legend.title=element_text(size=20))+theme(legend.position = c(0.79, 0.15))
+#Fgiure 17
+png("Random_Forest_ROC_curve_new.png", height = 800, width = 1500)
+basicplot
+dev.off()
+```
+
+## Predict no fall and falls>=2 (All features)
+
+```{r}
+#with all features
+tel <- read.csv("telaviv_norm_complete.csv") %>% filter(Fall_1_year != 1) #90 subjects
+#Table 17
+table(tel$Fall)
+tel <- tel[,-c(1,2,3,5,9,10,22,23)]
+X_sl <- tel[,-156]
+Y_sl <- tel[,156]
+cat_num <- c(3,156)
+for (i in cat_num) {
+    tel[,i] <- as.factor(tel[,i])
+}
+
+X <- tel[, -156]
+Y <- tel[, 156]
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+
+my.rf <- function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y, mtry = 115)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...,mtry = 115)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+
+# cross-validation results
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "linear") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+
+results <- data.frame(Method=c("Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall(truncated) prediction with all features (TelAviv)")
+#Table 18
+write.csv(results,"truncated_tel_all_features.csv",row.names = F)
+```
+
+##predict no fall and falls>=2 (Selected features)
+```{r}
+#with selected feature
+tel <- read.csv("telaviv_norm_complete.csv")%>% filter(Fall_1_year != 1) %>%
+  select(gaitSpeed_Off, ABC, BMI, PIGD_score, X2.11, partII_sum, Attention, DGI, FOG_Q, H_and_Y_OFF,Fall)
+
+X_sl <- tel[,-11]
+Y_sl <- tel[,11]
+tel$Fall <- as.factor(tel$Fall)
+X <- tel[, -11]
+Y <- tel[, 11]
+
+#setup pred functions
+##Random Forests
+my.rf <- function(train.x, train.y, test.x, test.y,cutoff=c(0.5,0.5),mtry=3) {
+    rf.fit = randomForest(x=train.x, y=train.y,cutoff=cutoff,mtry=mtry)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+# cross-validation results
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F,cutoff=c(0.6,0.4))
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X), as.numeric(Y)-1, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X, Y, K = 5, B = 1,method = "radia") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, as.matrix(X), Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X, as.numeric(Y)-1, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+
+results <- data.frame(Method=c("Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction(Truncated) with Selected Features (TelAviv)")
+#Table 19
+write.csv(results,"truncated_tel_selected_features.csv",row.names = F)
+```
+
+## Unsupervised learning (Supplementary Table 1)
+### Hierarchical clustering
+
+```{r}
+tel <- read.csv("telaviv_norm_complete.csv")
+X_n <- tel %>% select(-SubjectID,-Group_PIGD,-PredomiNAnt,-Fall_1_year)
+Y = tel$Fall %>% as.factor()
+pitch_comp = agnes(X_n, diss=FALSE, method='complete')
+pitch_ward = agnes(X_n, diss=FALSE, method='ward')
+dis = dist(X_n)
+sil_comp = silhouette(cutree(pitch_comp, k=2), dis)
+sil_ward = silhouette(cutree(pitch_ward, k=2), dis)
+summary(sil_ward)
+summary(sil_comp)
+# select ward k=2
+plot(sil_ward)
+
+mds = as.data.frame(cmdscale(dis, k=2))
+ward = as.matrix(sil_ward)
+mds = as.data.frame(cmdscale(dis, k=2))
+mds$cluster = as.factor(ward[,1])
+FALL = as.factor(Y)
+p_hier <- ggplot(mds, aes(x=V2, y=V1, z = cluster))+
+  geom_point(aes(shape=FALL,color=cluster),alpha=0.8)+ggtitle("hierarchical")+       
+  scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8,base_family = "Times New Roman") +
+    labs( color = "Fall or Not") +
+    labs( shape = "cluster")
+```
+
+
+### k-means++ clustering
+
+```{r}
+dat_norm = X_n
+# k-means----
+# k++ initialize
+kpp_init = function(dat, K) {
+  x = as.matrix(dat)
+  n = nrow(x)
+  # Randomly choose a first center
+  centers = matrix(NA, nrow=K, ncol=ncol(x))
+  centers[1,] = as.matrix(x[sample(1:n, 1),])
+  for (k in 2:K) {
+    # Calculate dist^2 to closest center for each point
+    dists = matrix(NA, nrow=n, ncol=k-1)
+    for (j in 1:(k-1)) {
+      temp = sweep(x, 2, centers[j,], '-')
+      dists[,j] = rowSums(temp^2)
+    }
+    dists = rowMins(dists)
+    # Draw next center with probability propor to dist^2
+    cumdists = cumsum(dists)
+    prop = runif(1, min=0, max=cumdists[n])
+    centers[k,] = as.matrix(x[min(which(cumdists > prop)),])
+  }
+  return(centers)
+}
+clust_kmeans2 = kmeans(X_n, kpp_init(X_n, 2), iter.max=100, algorithm='Lloyd')
+clust_k2 = clust_kmeans2$cluster
+sil_k2 = silhouette(clust_k2,dis) #best
+summary(sil_k2)
+#plot(sil_k2)
+
+
+# binary
+mds = as.data.frame(cmdscale(dis, k=2))
+mds_temp = cbind(mds, as.factor(clust_kmeans2$cluster))
+names(mds_temp) = c('V1', 'V2', 'clust_k2')
+FALL = as.factor(Y)
+p_kpp <- ggplot(mds_temp, aes(x=V2, y=V1, color=clust_k2)) + geom_point(aes(shape = FALL)) + theme()+ggtitle("k-means++") +
+    scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8,base_family = "Times New Roman") +
+    labs( color = "Fall or Not") +
+    labs( shape = "cluster")
+
+```
+
+### GMM
+
+```{r}
+mclust = Mclust(X_n)
+par(mfrow = c(1,2))
+plot(mclust, what = "BIC")
+fitted <- predict.Mclust(mclust, X_n)
+sil_mclust = silhouette(x = fitted$classification,dis)
+summary(sil_mclust)
+plot(sil_mclust)
+
+mds = as.data.frame(cmdscale(dis, k=2))
+mds_temp = cbind(mds, as.factor(fitted$classification))
+names(mds_temp) = c('V1', 'V2', 'mclust_k3')
+(ggplot(mds_temp, aes(x=V2, y=V1, color=mclust_k3)) +geom_point(aes(shape = Y)) + theme())
+
+mclust = Mclust(X_n,modelNames = c("EII"),G = 2)
+#plot(mclust, what = "BIC")
+fitted <- predict.Mclust(mclust, X_n)
+sil_mclust = silhouette(x = fitted$classification,dis)
+plot(sil_mclust)
+mds = as.data.frame(cmdscale(dis, k=2))
+mds_temp = cbind(mds, as.factor(fitted$classification))
+names(mds_temp) = c('V1', 'V2', 'mclust_k2')
+FALL = as.factor(Y)
+p_gmm <- ggplot(mds_temp, aes(x=V2, y=V1, color=mclust_k2)) +geom_point(aes(shape = FALL)) + ggtitle("GMM") +
+    scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8,base_family = "Times New Roman") +
+    labs( color = "Fall or Not") +
+    labs( shape = "cluster")
+```
+
+```{r}
+pdf("Cluster_Projection.pdf", height = 6, width = 10)
+grid.arrange(p_hier,p_kpp,p_gmm,ncol=3)
+dev.off()
+```
+
+# Analysis on aggregated data
+## Exploratory Analysis
+
+```{r}
+ut <- read.csv("tel_udall_complete.csv")
+
+## draw correlation heat map for selected variable (Table 2)
+ut_vis <- select(ut,gaitSpeed_Off, PIGD_score, partII_sum, BMI, X2.11, H_and_Y_OFF, X3.10gait_off)
+pdf("ut_heatmap.pdf", height = 6, width = 6, family = 'Times New Roman')
+my.heatmap(ut_vis)
+dev.off()
+## Batch effect
+#normalization together
+#MDS justification 
+mds = as.data.frame(cmdscale(dist(ut[,-c(1,2,133)]%>% scale() %>% as.data.frame()),k=2))
+mds$batch = as.factor(c(rep("Tel-Aviv",103),rep("Michigan",148)))
+q1 = ggplot(mds, aes(x=V1, y=V2, z = batch)) + 
+  geom_point(aes(color=batch),size=0.8,alpha=0.8)+ggtitle("combine -> Nomalize, MDS")+
+      scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8) +
+    labs( BATCH = "Fall or Not")
+#tsne justification 
+set.seed(0) # Set a seed if you want reproducible results
+tsne_out <- Rtsne(ut[,-c(1,2,133)]%>% scale() %>% as.data.frame())$Y %>% as.data.frame()
+tsne_out$batch = as.factor(c(rep("Tel-Aviv",103),rep("Michigan",148)))
+q2 = ggplot(tsne_out, aes(x=V1, y=V2, z = batch)) + 
+  geom_point(aes(color=batch),size=0.8,alpha=0.8)+ggtitle("combine -> Nomalize, tSNE")+
+        scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8) +
+    labs( BATCH = "Fall or Not")
+
+## normalization separaterly
+mds = as.data.frame(
+  cmdscale(dist(rbind(ut[1:103,-c(1,2,133)]%>% scale() %>% as.data.frame(),
+                      ut[104:251,-c(1,2,133)]%>% scale())),
+                k=2))
+mds$batch = as.factor(c(rep("Tel-Aviv",103),rep("Michigan",148)))
+q3 = ggplot(mds, aes(x=V1, y=V2, z = batch)) + 
+  geom_point(aes(color=batch),size=0.8,alpha=0.8)+ggtitle("Nomalize -> combine, MDS")+
+        scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8) +
+    labs( BATCH = "Fall or Not")
+set.seed(0) # Set a seed if you want reproducible results
+tsne_out <- Rtsne(rbind(ut[1:103,-c(1,2,133)]%>% scale() %>% as.data.frame(),
+                        ut[104:251,-c(1,2,133)]%>% scale() %>% as.data.frame()))$Y %>% as.data.frame()
+tsne_out$batch = as.factor(c(rep("Tel-Aviv",103),rep("Michigan",148)))
+q4 = ggplot(tsne_out, aes(x=V1, y=V2, z = batch)) + 
+  geom_point(aes(color=batch),size=0.8,alpha=0.8)+ggtitle("Nomalize -> combine, tSNE")+
+        scale_color_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size = 8) +
+    labs( BATCH = "Fall or Not")
+#Figure 6
+pdf("batch_effect.pdf", height = 6, width = 6)
+grid.arrange(q1,q2,q3,q4,ncol = 2,nrow=2)
+dev.off()
+
+
+##Incongruency between patients from Udall and Telaviv
+ut1 <- ut %>% mutate(institute = NA) %>% select(-SubjectID,-gender,-Fall,-Group_PIGD,-Tremor_score,-PIGD_score)
+ut1$institute[1:103] <- "Tel-Aviv"
+ut1$institute[104:251] <- "Michigan"
+
+ks_pvalue <- data.frame(cbind(names(ut1)[1:127],rep(0,127)))
+names(ks_pvalue) <- c("Feature","pvalue")
+ks_pvalue$pvalue <- as.numeric(ks_pvalue$pvalue)
+
+                        
+for (i in 1:127){
+    t <- ks.test(ut1[ut1$institute=="Tel-Aviv",i],ut1[ut1$institute=="Udall",i])
+    ks_pvalue$pvalue[i] <- (t$p.value)
+}
+
+ks_pvalue$qvalue <- p.adjust(ks_pvalue$pvalue,"BH")
+ks_pvalue[which(ks_pvalue$qvalue==0),]$qvalue <- min(ks_pvalue[which(ks_pvalue$qvalue!=0),]$qvalue)
+ks_pvalue <- ks_pvalue %>% mutate(trans_qvalue=-log(qvalue))
+ks_pvalue$Feature <- factor(ks_pvalue$Feature, levels=ks_pvalue$Feature) 
+sum(ks_pvalue$qvalue < 0.01)
+
+#Figure 4
+png("ud_tel_ks_qvalues.png",height = 1000, width = 3000, res=200)
+p <- ggplot(ks_pvalue, aes(Feature,trans_qvalue)) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylab("-log(q-value)")
+cutoff <- data.frame(yintercept=4.60517, cutoff="-log(0.01)")
+p +  geom_hline(aes(yintercept=yintercept, linetype=cutoff), data=cutoff, show.legend=TRUE, color="red") +
+    ggtitle("Testing Incongruency - Results of KS test") + theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+#############################################EXTRA#######################################################
+ut_norm <- read.csv("tel_udall_norm_complete.csv")
+ut2 <- ut_norm %>% mutate(institute = NA) %>% select(-SubjectID,-gender,-Fall)
+ut2$institute[1:103] <- "Tel-Aviv"
+ut2$institute[104:251] <- "Udall"
+
+ks_pvalue2 <- data.frame(cbind(names(ut2)[1:126],rep(0,126)))
+names(ks_pvalue2) <- c("Feature","pvalue")
+ks_pvalue2$pvalue <- as.numeric(ks_pvalue2$pvalue)
+
+                        
+for (i in 1:126){
+    t <- ks.test(ut2[ut2$institute=="Tel-Aviv",i],ut2[ut2$institute=="Udall",i])
+    ks_pvalue2$pvalue[i] <- (t$p.value)
+}
+
+ks_pvalue2$qvalue <- p.adjust(ks_pvalue2$pvalue,"BH")
+ks_pvalue2[which(ks_pvalue2$qvalue==0),]$qvalue <- min(ks_pvalue2[which(ks_pvalue2$qvalue!=0),]$qvalue)
+ks_pvalue2 <- ks_pvalue2 %>% mutate(trans_qvalue=-log(qvalue))
+ks_pvalue2$Feature <- factor(ks_pvalue2$Feature, levels=ks_pvalue2$Feature) 
+sum(ks_pvalue2$qvalue < 0.01)
+
+
+png("ud_tel_ks_qvalues2.png",height = 500, width = 1500)
+p <- ggplot(ks_pvalue2, aes(Feature,trans_qvalue)) + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylab("-log(q-value)")
+cutoff <- data.frame(yintercept=4.60517, cutoff="-log(0.01)")
+p +  geom_hline(aes(yintercept=yintercept, linetype=cutoff), data=cutoff, show.legend=TRUE, color="red") +
+    ggtitle("Testing Incongruency (on standardized data) - Results of KS test")
+dev.off()
+#########################################################################################################
+ut_sim <- ut1 %>% select(X1.2,X2.9,X3.11,MoCA,age,H_and_Y_OFF,institute) 
+ut_diff <- ut1 %>% select(X1.4,X2.4,off_3.3a,L_inferior_frontal_gyrus,TUG_OFF,BMI,institute) 
+
+
+density_plots1 <- function(df){
+    top <- select(df, dplyr::one_of(names(df)))
+    top_0 <- filter(top, institute == "Michigan")
+    top_1 <- filter(top, institute == "Tel-Aviv")
+    wide <- rbind(top_0, top_1)
+    long <- gather(wide, key = Variable, value = Value, X1.2:H_and_Y_OFF)
+    ggplot(long, aes(x = Value)) + 
+    geom_density(aes(fill = institute), alpha = 0.4) + 
+    theme_bw() + facet_wrap(~Variable, nrow = 1, scales = "free")+
+        ggtitle("Features with similar distribution") +
+         scale_fill_manual(values=c("#000099", "#FF9933"))+
+    theme_hc(base_size=14) +
+    xlab("The value of the similar features") +
+    labs( fill = "Institute")
+}
+
+pdf("ud_tel_similar_var.pdf",height = 3, width = 18) # Figure 5
+density_plots1(ut_sim)
+dev.off()
+
+density_plots2 <- function(df){
+    top <- select(df, dplyr::one_of(names(df)))
+    top_0 <- filter(top, institute == "Michigan")
+    top_1 <- filter(top, institute == "Tel-Aviv")
+    wide <- rbind(top_0, top_1)
+    long <- gather(wide, key = Variable, value = Value, X1.4:BMI)
+    ggplot(long, aes(x = Value)) + 
+    geom_density(aes(fill = institute), alpha = 0.4) + 
+    theme_bw() + facet_wrap(~Variable, nrow = 1, scales = "free") +
+        ggtitle("Features with significantly different distribution") +
+         scale_fill_manual(values=c("#000099", "#FF9933")) +
+    theme_hc(base_size=14) + xlab("The value of the different features") +
+    labs( fill = "Institute")
+}
+
+pdf("ud_tel_diff_var.pdf",height = 3, width = 18)
+density_plots2(ut_diff)
+dev.off()
+```
+
+## Udall & Tel-Aviv mixed dataset
+### Feature Selection
+
+```{r}
+ut <- read.csv("tel_udall_norm_complete.csv")
+ut <- ut[,-c(1,2,7,8)]
+cat_num <- c(3,129)
+ut[,cat_num] <- lapply(ut[,cat_num],as.factor)
+
+
+#Random Forest (500 iterations)
+N <- 500
+control <- trainControl(method="cv", number=5)
+set.seed(2017)
+ut_var_lst <- c()
+for (i in 1:N){
+    samples <- sample(1:251, 0.632*nrow(ut),replace = T)
+    rf_mod <- train(Fall~., data=ut[samples,], method="rf", trControl=control, allowParallel = TRUE)
+    imp_temp <- as.data.frame(varImp(rf_mod)$importance) #%IncMSE
+    imp_temp$var <- row.names(imp_temp)
+    names(imp_temp) <- c("imp","var")
+    imp_temp$imp <- as.numeric(as.character(imp_temp$imp))
+    ut_var_lst <- c(ut_var_lst,imp_temp[order(-imp_temp$imp),]$var[1:20]) #top 20
+}
+
+ut_counts_rf <- as.data.frame(sort(table(ut_var_lst),decreasing=T)[1:20])
+names(ut_counts_rf) <- c("Features","Frequency")
+ut_counts_rf <- ut_counts_rf %>% mutate(Prop = Frequency/500)
+#Table 8
+write.csv(ut_counts_rf,"ut_feature_selection_rf.csv",row.names = F)
+#Figure 15
+png("rf_ut_feature_selection.png", height = 800, width = 2000, res = 200)
+ggplot(ut_counts_rf,aes(reorder(Features,-Frequency),Frequency)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("Features") + ggtitle("Feature Selection by Random Forests (Michigan+Tel-Aviv)")+theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+#knockoff
+ut <- read.csv("tel_udall_norm_complete.csv")
+set.seed(2017)
+counts_ko_ut <- my.bt.ko(ut[,-c(1,2,7,8,133)],ut[,133],mtry=40,fdr=0.35,iter=1000)
+nm_ut <- colnames(ut)[-c(1,2,7,8,133)]
+counts_ko_ut <- data.frame(Feature=nm_ut[names(counts_ko_ut)%>% as.numeric()],Frequency=counts_ko_ut %>% as.matrix())
+#Proportion
+counts_ko_ut <- counts_ko_ut[1:20,] %>% mutate(Prop=Frequency/1000*(128/40))  
+#Table 8
+write.csv(counts_ko_ut,"ut_feature_selection_ko.csv",row.names = F)
+
+#Figure 15
+png("ko_ut_feature_selection.png", height = 800, width = 2000, res = 200)
+ggplot(counts_ko_ut[1:20,],aes(reorder(Feature,-Frequency),Frequency)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("Features") + ggtitle("Feature Selection by Knock Off (Michigan+Tel-Aviv)")+theme(plot.title = element_text(lineheight=3, face="bold", color="black", size=15),axis.title.y = element_text(size = 15, angle = 90),axis.title.x = element_text(size = 15, angle = 0))
+dev.off()
+
+########################Tests (Table 9)########################
+ut <- read.csv("tel_udall_complete.csv") 
+####Wilcoxon-test
+wilcox.test(gaitSpeed_Off~Fall,ut)
+wilcox.test(PIGD_score~Fall,ut)
+wilcox.test(partII_sum~Fall,ut)
+wilcox.test(BMI~Fall,ut)
+wilcox.test(X2.11~Fall,ut)
+wilcox.test(H_and_Y_OFF~Fall,ut)
+wilcox.test(X3.10gait_off~Fall,ut)
+
+####KS-test
+ks.test(ut[ut$Fall==1,]$gaitSpeed_Off,ut[ut$Fall==0,]$gaitSpeed_Off)
+ks.test(ut[ut$Fall==1,]$PIGD_score,ut[ut$Fall==0,]$PIGD_score)
+ks.test(ut[ut$Fall==1,]$partII_sum,ut[ut$Fall==0,]$partII_sum)
+ks.test(ut[ut$Fall==1,]$BMI, ut[ut$Fall==0,]$BMI)
+ks.test(ut[ut$Fall==1,]$X2.11,ut[ut$Fall==0,]$X2.11)
+ks.test(ut[ut$Fall==1,]$H_and_Y_OFF,ut[ut$Fall==0,]$H_and_Y_OFF)
+ks.test(ut[ut$Fall==1,]$X3.10gait_off,ut[ut$Fall==0,]$X3.10gait_off)
+
+```
+
+### Predict Fall with all features
+
+```{r}
+ut <- read.csv("tel_udall_norm_complete.csv")
+ut <- ut[,-c(1,2,7,8)]
+X_sl <- ut[,-129]
+Y_sl <- ut[,129]
+
+cat_num <- c(3,129)
+for (i in cat_num) {
+    ut[,i] <- as.factor(ut[,i])
+}
+
+X <- ut[, -129]
+Y <- ut[, 129]
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+Y_rf <- Y
+levels(Y_rf) <- make.names(levels(Y_rf))
+###Parameter tuning--mtry = 15
+ctrl<-trainControl(method="cv", number=5,allowParallel = TRUE)
+grid_rf<-expand.grid(.mtry=seq(10,120,by = 5))
+set.seed(2017)
+m_rf <- caret::train(x=X,y=Y_rf,method = "rf", metric = "Accuracy", trControl = ctrl, 
+              tuneGrid = grid_rf,negative="X0")
+m_rf$results
+
+
+my.rf <- function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+# cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada = crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "linear") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with All Features (Udall + TelAviv)")
+#Table 20
+write.csv(results,"ut_fall_prediction_all_features.csv",row.names = F)
+
+```
+
+### Predict Fall with selected features
+
+```{r}
+ut <- read.csv("tel_udall_norm_complete.csv")
+ut <- ut[,c("gaitSpeed_Off", "PIGD_score", "partII_sum", "BMI", "X2.11", "H_and_Y_OFF", "X3.10gait_off","Fall")]
+X_sl <- ut[,-8]
+Y_sl <- ut[,8]
+ut$Fall <- as.factor(ut$Fall)
+
+X <- ut[, -8]
+Y <- ut[, 8]
+
+
+#Density plot
+density_plots <- function(df){
+    top <- select(df, one_of(names(df)))
+    top_0 <- filter(top, Fall == "0")
+    top_1 <- filter(top, Fall == "1")
+    wide <- rbind(top_0, top_1)
+    long <- gather(wide, key = Variable, value = Value, gaitSpeed_Off:X3.10gait_off)
+    long$Variable <- factor(long$Variable, levels = c("gaitSpeed_Off", "PIGD_score", "partII_sum", "BMI", "X2.11", "H_and_Y_OFF", "X3.10gait_off"))
+    ggplot(long, aes(x = Value)) + 
+    geom_density(aes(fill = Fall), alpha = 0.4) + 
+    theme_bw() + facet_wrap(~Variable, nrow = 2, scales = "free") +
+         scale_fill_manual(values=c("#000099", "#FF9933"))+
+    theme_hc(base_size=14 ,base_family = "Times New Roman") +
+    xlab("The value of the different features") +
+    labs( fill = "Fall or Not")
+}
+
+ut_temp <- read.csv("tel_udall_complete.csv")
+ut_temp <- ut_temp %>% select(gaitSpeed_Off, PIGD_score, partII_sum, BMI, X2.11, H_and_Y_OFF, X3.10gait_off,Fall) %>% mutate(Fall=as.factor(Fall))
+pdf("ut_feature_density.pdf",height = 5, width = 10)
+density_plots(ut_temp)
+dev.off()
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    # count TP, FP etc.
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf <- function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    # count TP, FP etc.
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function (train.x, train.y, test.x, test.y){
+  xgb.mod <- xgboost(data = train.x, label = train.y, verbose = FALSE,
+                max.depth = 4, eta = 0.25, nthread = 2, 
+                nround = 20, gamma = 0.1, booster="gbtree", 
+                objective = "binary:logistic")
+  predict.y <- ifelse(predict(xgb.mod, test.x)>0.5,1,0)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##SVM
+my.svm <- function (train.x, train.y, test.x, test.y,method,cost=1,gamma=1/ncol(dx_norm),coef0=0,degree=3){
+  svm_l.fit <- svm(x = train.x,y = train.y,kernel = method)
+  predict.y <- predict(svm_l.fit, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+
+##Neural Network
+pred <- function(nn, dat) {
+    yhat = compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+
+my.neural <- function (train.x, train.y, test.x, test.y,method,layer=c(5,5)){
+  train.x <- as.data.frame(train.x)
+  train.y <- as.data.frame(train.y)
+  colnames(train.x) <- paste0('V', 1:ncol(X)) 
+  colnames(train.y) <- "V1"
+  train_y_ind = model.matrix(~factor(train.y$V1)-1)
+  colnames(train_y_ind) = paste0('out', 0:1)
+  train = cbind(train.x, train_y_ind)
+  y_names = paste0('out', 0:1)
+  x_names = paste0('V', 1:ncol(train.x))
+  nn = neuralnet(
+    paste(paste(y_names, collapse='+'),
+          '~',
+          paste(x_names, collapse='+')),
+    train,
+    hidden=layer,
+    linear.output=FALSE,
+    lifesign='full', lifesign.step=100)
+  #predict
+  predict.y <- pred(nn, test.x)
+  out <- crossval::confusionMatrix(test.y, predict.y,negative = 0)
+  return (out)
+}
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+  SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+  SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+             nround = 146, gamma = .05, colsample_bytree = 0.397, 
+             min_child_weight = 2, subsample = 0.6899,
+             booster="gbtree", verbose = 0,
+             objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(train.x, train.y, test.x, test.y){
+  newX <- as.data.frame(test.x)
+  SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+  fitSL <- SuperLearner(Y = train.y, X = train.x, newX = newX,
+                        SL.library = SL.library, 
+                        family = binomial(), method = 'method.NNLS', 
+                        verbose = FALSE, cvControl = list(V = 5))
+  print(fitSL$coef)
+  out <- crossval::confusionMatrix(test.y, round(fitSL$SL.predict), negative = 0)
+  return(out)
+}
+
+
+# cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+set.seed(2017)
+cv.out.xgb <- crossval::crossval(my.xgb, as.matrix(X_sl), Y_sl, K = 5, B = 1) 
+xgb_result <- diagnosticErrors(cv.out.xgb$stat)
+xgb_result
+
+set.seed(2017)
+cv.out.svm <- crossval::crossval(my.svm, X_sl, Y, K = 5, B = 1,method = "linear") 
+svm_result <- diagnosticErrors(cv.out.svm$stat)
+svm_result
+
+set.seed(2017)
+cv.out.nn <- crossval::crossval(my.neural, X_sl, Y, K = 5, B = 1,layer=c(5,10))
+nn_result <- diagnosticErrors(cv.out.nn$stat)
+nn_result
+
+set.seed(2017)
+cv.out.sl <- crossval::crossval(my.sl, X_sl, Y_sl, K = 5, B = 1,verbose = F)
+sl_result <- diagnosticErrors(cv.out.sl$stat)
+sl_result
+
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with Selected Features (Udall + TelAviv)")
+#Table 21
+write.csv(results,"ut_fall_prediction_selected_features.csv",row.names = F)
+
+```
+
+
+## Uall + Tel-Aviv:TD/PIGD and Fall
+
+```{r}
+ut <- read.csv("tel_udall_norm_complete.csv")
+ut <- ut[,c(2,5,6,9:12,76,133)]
+ut[,c(1,2,9)] <- lapply(ut[,c(1,2,9)],as.factor)
+
+X <- ut[, -9]
+Y <- ut[, 9]
+
+#setup pred functions
+##Logistic Regression
+my.logit = function(train.x, train.y, test.x, test.y) {
+    logit.fit = glm(train.y ~ ., data = train.x, family = binomial)
+    ynew = predict(logit.fit, test.x)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf = function(train.x, train.y, test.x, test.y) {
+    rf.fit = randomForest(x=train.x, y=train.y)
+    ynew = predict(rf.fit, test.x)
+    out = crossval::confusionMatrix(test.y, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(train.x, train.y, test.x, test.y) {
+    ada.fit <- ada(train.x, train.y)
+    predict.y <- predict(ada.fit, test.x)
+    out <- crossval::confusionMatrix(test.y, predict.y, negative = "0")
+    return(out)
+}
+
+
+#cross-validation results
+set.seed(2017)
+cv.out.logit <- crossval::crossval(my.logit, X, Y, K = 5, B = 1,verbose = F)
+logit_result <- diagnosticErrors(cv.out.logit$stat)
+logit_result
+
+set.seed(2017)
+cv.out.rf <- crossval::crossval(my.rf, X, Y, K = 5, B = 1,verbose = F)
+rf_result <- diagnosticErrors(cv.out.rf$stat)
+rf_result
+
+set.seed(2017)
+cv.out.ada <- crossval::crossval(my.ada, X, Y, K = 5, B = 1,verbose = F)
+ada_result <- diagnosticErrors(cv.out.ada$stat)
+ada_result
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost"), rbind(logit_result,rf_result,ada_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction with Selected Features+TD/PIGD (Udall)")
+#Table 26
+write.csv(results,"ut_fall_prediction_TDPIGD.csv",row.names = F)
+```
+
+## Training/Testing on each other
+### Train on Udall/Test on Tel-Aviv
+
+```{r}
+ut <- read.csv("tel_udall_norm_complete.csv") %>% select(gaitSpeed_Off, PIGD_score, partII_sum, BMI, X2.11, H_and_Y_OFF, X3.10gait_off,Fall) 
+
+tel_sl <- ut[1:103,]
+ud_sl <- ut[104:251,]
+
+ut <- ut %>% mutate(Fall=as.factor(Fall))
+
+tel <- ut[1:103,]
+ud <- ut[104:251,]
+
+#setup pred functions
+##Logistic Regression
+my.logit <- function(df_train, df_test) {
+    logit.fit = glm(Fall ~ ., data = df_train, family = binomial)
+    ynew = predict(logit.fit, df_test)
+    ynew = ifelse(ynew > 0.5, 1, 0)
+    out = crossval::confusionMatrix(df_test$Fall, ynew, negative = "0")
+    return(out)
+}
+
+##Random Forests
+my.rf <- function(df_train, df_test) {
+    rf.fit = randomForest(Fall~., data = df_train)
+    ynew = predict(rf.fit, df_test)
+    out = crossval::confusionMatrix(df_test$Fall, ynew, negative = "0")
+    return(out)
+}
+
+##AdaBoost
+my.ada <- function(df_train, df_test) {
+    ada.fit <- ada(Fall~., data=df_train)
+    ynew <- predict(ada.fit, df_test)
+    out <- crossval::confusionMatrix(df_test$Fall, ynew, negative = "0")
+    return(out)
+}
+
+##XGBoost
+my.xgb <- function(df_train, df_test) {
+    xgb.fit <- xgboost(data = as.matrix(df_train %>% select(-Fall)), label = df_train$Fall,                    verbose = FALSE,
+                       max.depth = 4, eta = 0.25, nthread = 2, 
+                       nround = 20, gamma = 0.2, booster="gbtree", 
+                       objective = "binary:logistic")
+    ynew <- ifelse(predict(xgb.fit, as.matrix(df_test))>0.5,1,0)
+    out <- crossval::confusionMatrix(df_test$Fall, ynew, negative = "0")
+    return(out)
+}
+
+
+##SVM Gaussian 
+my.svm <- function(df_train, df_test){
+    svm.fit <- svm(x=(df_train %>% select(-Fall)),y=as.factor(df_train$Fall),kernel = "linear",cost=0.01)
+    ynew <- predict(svm.fit,df_test %>% select(-Fall))
+    out <- crossval::confusionMatrix(df_test$Fall, ynew, negative = "0")
+    return(out)
+}
+
+##Neural Network
+#NN
+pred = function(nn, dat) {
+    dat = as.matrix(dat%>% select(-Fall))
+    yhat = neuralnet::compute(nn, dat)$net.result
+    yhat = apply(yhat, 1, which.max)-1
+    return(yhat)
+}
+my.nn <- function(df_train,df_test){
+    train.x <- df_train %>% select(-Fall)
+    train.y <- df_train$Fall
+    colnames(train.x) <- paste0('V', 1:ncol(train.x)) 
+    train_y_ind = model.matrix(~factor(train.y)-1)
+    colnames(train_y_ind) = paste0('out', 0:1)
+    train = cbind(train.x, train_y_ind)
+    y_names = paste0('out', 0:1)
+    x_names = paste0('V', 1:ncol(train.x))
+    set.seed(2017)
+    nn <- neuralnet(paste(paste(y_names, collapse='+'),'~',
+                          paste(x_names, collapse='+')),train,hidden=c(15,15),linear.output=FALSE,
+                    lifesign='full', lifesign.step=100)
+    y_new <- pred(nn, df_test)
+    out <- crossval::confusionMatrix(df_test$Fall, y_new, negative = "0")
+    return(out)
+}
+
+
+##Super Learner
+SL.randomForest.1 <- function(...){
+    SL.randomForest(...)
+}
+
+SL.xgboost.1 <- function(...){
+    SL.xgboost(..., max.depth = 3, eta = 0.242, nthread = 2, 
+               nround = 146, gamma = .05, colsample_bytree = 0.397, 
+               min_child_weight = 2, subsample = 0.6899,
+               booster="gbtree", verbose = 0,
+               objective = "binary:logistic")
+}
+
+SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+
+my.sl <- function(df_train,df_test){
+    newX <- df_test
+    SL.library <- c("SL.xgboost.1", "SL.randomForest.1")
+    fitSL <- SuperLearner(Y = df_train$Fall, X = df_train[,1:(ncol(df_train)-1)],
+                          SL.library = SL.library, 
+                          family = binomial(), method = 'method.NNLS', 
+                          verbose = FALSE, cvControl = list(V = 5))
+    print(fitSL$coef)
+    out <- crossval::confusionMatrix(df_test$Fall, round(fitSL$SL.predict), negative = 0)
+    return(out)
+}
+
+
+#Prediction results
+out.logit <- my.logit(ud,tel)
+logit_result <- diagnosticErrors(out.logit)
+logit_result
+
+set.seed(2017)
+out.rf <- my.rf(ud,tel)
+rf_result <- diagnosticErrors(out.rf)
+rf_result
+
+set.seed(2017)
+out.ada <- my.ada(ud,tel)
+ada_result <- diagnosticErrors(out.ada)
+ada_result
+
+set.seed(2017)
+out.xgb <- my.xgb(ud_sl,tel_sl)
+xgb_result <- diagnosticErrors(out.xgb)
+xgb_result
+
+set.seed(2017)
+out.svm <- my.svm(ud_sl,tel_sl)
+svm_result <- diagnosticErrors(out.svm)
+svm_result
+
+set.seed(2017)
+out.nn <- my.nn(ud_sl,tel_sl)
+nn_result <- diagnosticErrors(out.nn)
+nn_result
+
+set.seed(2017)
+out.sl <- my.sl(ud_sl,tel_sl)
+sl_result <- diagnosticErrors(out.sl)
+sl_result
+
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction (Train: Udall / Test: TelAviv))")
+#Table 22
+write.csv(results,"udall_tel_fall_prediction.csv",row.names = F)
+```
+
+### Train on Tel-Aviv/Test on Udall
+
+```{r}
+#Prediction results
+out.logit <- my.logit(tel,ud)
+logit_result <- diagnosticErrors(out.logit)
+logit_result
+
+set.seed(2017)
+out.rf <- my.rf(tel,ud)
+rf_result <- diagnosticErrors(out.rf)
+rf_result
+
+set.seed(2017)
+out.ada <- my.ada(tel,ud)
+ada_result <- diagnosticErrors(out.ada)
+ada_result
+
+set.seed(2017)
+out.xgb <- my.xgb(tel_sl,ud_sl)
+xgb_result <- diagnosticErrors(out.xgb)
+xgb_result
+
+set.seed(2017)
+out.svm <- my.svm(tel_sl,ud_sl)
+svm_result <- diagnosticErrors(out.svm)
+svm_result
+
+set.seed(2017)
+out.nn <- my.nn(tel_sl,ud_sl)
+nn_result <- diagnosticErrors(out.nn)
+nn_result
+
+set.seed(2017)
+out.sl <- my.sl(tel_sl,ud_sl)
+sl_result <- diagnosticErrors(out.sl)
+sl_result
+
+
+results <- data.frame(Method=c("Logistic Regression","Random Forests","AdaBoost","XGBoost","SVM","Neural Network","Super Learner"), rbind(logit_result,rf_result,ada_result,xgb_result,svm_result,nn_result,sl_result))
+row.names(results) <- NULL
+kable(results, caption = "Fall Prediction (Train: TelAviv / Test: Udall))")
+#Table 23
+write.csv(results,"tel_udall_fall_prediction.csv",row.names = F)
+```
+
+# Reference
+
+Gao, C, Sun, H, Wang, T, Tang, M, Bohnen, N, Muller, M, Herman, T, Giladi, N, Kalinin, AA, Spino, C, Dauer, W, Hausdorff, JM, Dinov, ID. (2018) *Model-based and Model-free Machine Learning Techniques for Diagnostic Prediction and Classification of Clinical Outcomes in Parkinson's Disease*, Scientific Reports, DOI: [10.1038/s41598-018-24783-4](https://doi.org/10.1038/s41598-018-24783-4).
