@@ -1,6 +1,6 @@
 # PBDA
 
-<a href="http://doi.org/10.1038/s41598-018-24783-4"><img align="right" width="300" height="300" src="https://www.nature.com/content/SREP_Top100/SREP%20Top%20100%20author.jpg"></a>
+<a href="http://doi.org/10.1038/s41598-018-24783-4"><img align="right" width="300" height="300" src="https://raw.githubusercontent.com/SOCR/PBDA/master/SREP_2018_Top_100_Neuroscience_Author.jpg"></a>
 
 **Predictive Big Data Analytics (PBDA)**
 
